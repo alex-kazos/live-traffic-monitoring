@@ -1,0 +1,7 @@
+docker logs spark-analytics
+
+docker logs spark-alerts
+
+
+
+docker compose up -d --scale tracking=3

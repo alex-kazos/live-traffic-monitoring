@@ -1,0 +1,12 @@
+# Ignore all media files
+*.mp4
+*.csv
+*.json
+
+# Ignore the model
+Other/yolov8x.pt
+
+# Ignore all files under Dowloads directory
+Downloads/*
+
+.idea

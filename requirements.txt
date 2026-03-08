@@ -1,0 +1,4 @@
+ffmpeg-python==0.2.0
+numpy==2.4.2
+opencv-python==4.13.0.92
+kafka-python-ng==2.2.2

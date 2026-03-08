@@ -1,0 +1,151 @@
+# ---------------------------------------------------------------------------
+# Traffic Monitoring – Full Pipeline
+#
+# Services:
+#   zookeeper       – Kafka coordination
+#   kafka           – Message broker (topics: traffic-stats, traffic-alerts)
+#   kafka-init      – One-shot topic creator
+#   split           – Splits the source video into 2-min segments
+#   tracking        – CV detection + speed calculation; publishes to Kafka
+#                     (horizontally scalable: docker compose up --scale tracking=N)
+#   spark-analytics – PySpark Structured Streaming: queries Q1-Q3, Q5-Q6
+#                     Runs in local[*] mode (no separate master/worker needed)
+#   spark-alerts    – Lightweight kafka-python consumer for Q4 (>130 km/h)
+# ---------------------------------------------------------------------------
+
+networks:
+  traffic-net:
+    driver: bridge
+
+volumes:
+  video-data:   # shared between split → tracking
+
+services:
+
+  # ── Zookeeper ──────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    networks: [traffic-net]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Kafka ───────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    networks: [traffic-net]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"   # host access for debugging
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ── Topic Initialiser (one-shot) ────────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka-init
+    networks: [traffic-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic traffic-stats --partitions 16 --replication-factor 1 &&
+       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic traffic-alerts --partitions 4 --replication-factor 1 &&
+       echo 'Topics ready:' &&
+       kafka-topics --bootstrap-server kafka:29092 --list"
+    restart: "no"
+
+  # ── Split Service ───────────────────────────────────────────────────────────
+  split:
+    build:
+      context: .
+      dockerfile: Split/Dockerfile
+    container_name: traffic-split
+    networks: [traffic-net]
+    volumes:
+      - ./Downloads:/data/source:ro
+      - video-data:/data/segments
+    environment:
+      INPUT_VIDEO: "/data/source/Road traffic video for object recognition.mp4"
+      OUTPUT_DIR: "/data/segments"
+      SEGMENT_SECONDS: "120"
+    command: ["python", "-u", "video_split.py"]
+
+  # ── Tracking Service (horizontally scalable) ─────────────────────────────────
+  tracking:
+    build:
+      context: .
+      dockerfile: Tracking/Dockerfile
+    networks: [traffic-net]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - video-data:/data/segments
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      SEGMENTS_DIR: "/data/segments"
+      KAFKA_TOPIC_STATS: traffic-stats
+      KAFKA_TOPIC_ALERTS: traffic-alerts
+      ALERT_SPEED_KMH: "130"
+    command: ["python", "-u", "monitor_traffic.py"]
+    # Scale with: docker compose up --scale tracking=4
+
+  # ── Spark Analytics — local[*] mode (Q1-Q3, Q5, Q6) ─────────────────────────
+  # Runs PySpark in local mode: all threads on one JVM, no separate cluster.
+  # This is correct for the assignment scope and avoids the kubernetes-only
+  # apache/spark image's master/worker limitations.
+  spark-analytics:
+    build:
+      context: .
+      dockerfile: Spark/Dockerfile
+    container_name: spark-analytics
+    networks: [traffic-net]
+    restart: on-failure
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC_STATS: traffic-stats
+      SPARK_MASTER: "local[*]"
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[*]
+      - /app/analytics.py
+
+  # ── Real-Time Alerts Consumer (Q4: >130 km/h) ──────────────────────────────
+  spark-alerts:
+    build:
+      context: .
+      dockerfile: Spark/Dockerfile
+    container_name: spark-alerts
+    networks: [traffic-net]
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC_ALERTS: traffic-alerts
+    command: ["python3", "/app/alerts_consumer.py"]
