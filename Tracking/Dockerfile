@@ -6,7 +6,7 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Root-level requirements (opencv, numpy, ffmpeg-python)
+# Root-level requirements (opencv, numpy, kafka-python-ng)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -16,4 +16,4 @@ COPY Kafka/producer.py ./Kafka/producer.py
 # Main tracking script
 COPY Tracking/monitor_traffic.py .
 
-CMD ["python", "monitor_traffic.py"]
+CMD ["python", "-u", "monitor_traffic.py"]

@@ -1,12 +1,35 @@
-# Ignore all media files
+# Local environments and IDE metadata
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated outputs and runtime data
 *.mp4
 *.csv
-*.json
+*.db
+*.sqlite
+*.sqlite3
+*.log
+Downloads/
+data/
+db-data/
 
-# Ignore the model
+# One-off scraping artifacts and snapshots
+alerts.txt
+dl_html.py
+livecam.js
+naodos.html
+scripts_list.txt
+test_url.py
+
+# Optional large model weights
 Other/yolov8x.pt
-
-# Ignore all files under Dowloads directory
-Downloads/*
-
-.idea
