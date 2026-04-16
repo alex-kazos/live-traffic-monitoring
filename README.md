@@ -146,7 +146,3 @@ traffic-monitoring/
 ├── Split/                               # legacy split-video utilities; not used by docker compose
 └── start_docker.bat                     # legacy launcher for the older split-based workflow
 ```
-
-## Repository hygiene
-
-The file `UNNEEDED_FILES.md` lists local-only, generated, or legacy artifacts that are safe to review before committing. That list includes items such as `.idea/`, `.venv/`, `Tracking/__pycache__/`, `naodos.html`, `livecam.js`, `scripts_list.txt`, `dl_html.py`, `test_url.py`, and `alerts.txt`.
