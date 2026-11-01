@@ -30,6 +30,11 @@ echo.
 echo Dashboard:     http://localhost:8090
 echo Kafka broker:  localhost:9092
 echo.
+echo Live analytics (Plotly, runs outside Docker):
+echo                pip install -r LocalDashboard\requirements.txt   (first time only)
+echo                python LocalDashboard\dashboard.py
+echo                then open http://localhost:8050
+echo.
 echo Follow logs:   docker compose logs -f tracking-papagou tracking-roupaki
 echo                docker compose logs -f spark-analytics
 echo                docker compose logs -f spark-alerts
