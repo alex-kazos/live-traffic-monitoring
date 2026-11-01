@@ -1,23 +1,37 @@
 @echo off
 REM ============================================================
-REM  Traffic Monitoring — Full Pipeline Launcher
+REM  Traffic Monitoring - Pipeline Launcher
+REM
+REM  Builds and starts every service in docker-compose.yml:
+REM    kafka, kafka-init, tracking-papagou, tracking-roupaki,
+REM    spark-analytics, spark-alerts, dashboard
 REM ============================================================
 
-REM Build individual images (still useful for standalone testing)
-echo [1/2] Building traffic-split image...
-docker build -t traffic-split -f Split/Dockerfile .
+REM Run from the project root so docker compose finds docker-compose.yml
+cd /d "%~dp0"
 
-echo [2/2] Building traffic-tracking image...
-docker build -t traffic-tracking -f Tracking/Dockerfile .
+docker info >nul 2>&1
+if errorlevel 1 (
+    echo Docker is not running. Start Docker Desktop and try again.
+    exit /b 1
+)
+
+echo Building images and starting the pipeline...
+docker compose up -d --build --remove-orphans
+if errorlevel 1 (
+    echo.
+    echo docker compose failed - see the output above.
+    exit /b 1
+)
 
 echo.
-echo Done building individual images.
+docker compose ps
 echo.
-echo To launch the full pipeline (Kafka + Spark + Split + Tracking):
-echo   docker compose up
+echo Dashboard:     http://localhost:8090
+echo Kafka broker:  localhost:9092
 echo.
-echo To scale the Tracking service horizontally (e.g. 4 workers):
-echo   docker compose up --scale tracking=4
+echo Follow logs:   docker compose logs -f tracking-papagou tracking-roupaki
+echo                docker compose logs -f spark-analytics
+echo                docker compose logs -f spark-alerts
 echo.
-echo Spark Web UI available at: http://localhost:8080
-echo Kafka broker available at: localhost:9092
+echo Stop:          docker compose down

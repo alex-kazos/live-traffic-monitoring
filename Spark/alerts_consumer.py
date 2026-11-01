@@ -60,7 +60,7 @@ def open_db(db_path: str) -> sqlite3.Connection:
             vehicle_id    TEXT    NOT NULL,
             vehicle_type  TEXT    NOT NULL,
             speed_kmh     REAL    NOT NULL,
-            carriageway   TEXT    NOT NULL,
+            direction     TEXT    NOT NULL,
             alerted_at    TEXT    NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_alert_cam ON speed_alerts (camera_name);
@@ -76,7 +76,7 @@ def save_alert(conn: sqlite3.Connection, camera: str, vehicle_id: str,
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """INSERT INTO speed_alerts
-               (camera_name, vehicle_id, vehicle_type, speed_kmh, carriageway, alerted_at)
+               (camera_name, vehicle_id, vehicle_type, speed_kmh, direction, alerted_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (camera, vehicle_id, vehicle_type, round(speed_kmh, 2), carriageway, now),
     )

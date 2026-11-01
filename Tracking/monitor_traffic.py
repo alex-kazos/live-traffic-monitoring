@@ -1,14 +1,18 @@
 """
 monitor_traffic.py — Real-time traffic tracking from ipcamlive livestreams.
 
-Designed for SIDE-MOUNTED highway cameras (naodos.gr / Attiki Odos) where
-vehicles move LEFT ↔ RIGHT across the frame:
+The naodos.gr / Attiki Odos cameras are mounted above the motorway and look
+ALONG it, so vehicles move toward or away from the camera:
 
-  • I/C Papagou (cam231) : left = to Katechaki   | right = to Mesogeia-Vrilissia
-  • Roupaki Toll (cam88)  : left = to Elefsina    | right = to Athens Airport
+  • I/C Papagou (cam231) : left carriageway = to Katechaki | right = to Mesogeia-Vrilissia
+  • Roupaki Toll (cam88)  : left carriageway = to Elefsina  | right = to Athens Airport
 
-Speed is measured with VERTICAL TRIPWIRES (X-based crossing detection).
-Displacement-based fallback speed uses pixel-to-metre calibration.
+Each carriageway has a measuring zone (an image polygon) and a ground-plane
+calibration that maps image pixels to road metres: X across the road, Y along
+it, increasing away from the camera.  Speed comes from two TRIPWIRES at known
+Y positions — crossing times are interpolated between frames.  Vehicles that
+miss a tripwire fall back to a least-squares fit of their road position over
+time.
 
 All per-camera parameters are environment-variable driven so the same image
 can run two independent containers with no code changes.
@@ -22,18 +26,20 @@ Configuration env vars:
   ALERT_SPEED_KMH    km/h threshold for alerts           (default: 130)
   DB_PATH            SQLite file path                    (default: /data/db/traffic.db)
 
-  --- Geometry / Calibration ---
-  SPLIT_COORD        X pixel that divides left / right carriageway  (default: 640)
-  LINE_L1_COORD      Left carriage first  tripwire X (car enters)   (default: 580)
-  LINE_L2_COORD      Left carriage second tripwire X (car exits)    (default: 100)
-  LINE_R1_COORD      Right carriage first  tripwire X               (default: 700)
-  LINE_R2_COORD      Right carriage second tripwire X               (default: 1180)
-  DIST_REAL_M        Real-world distance (m) between the two lines  (default: 28.0)
-  PIXELS_PER_METER   Pixel-to-metre ratio for fallback speed        (default: 16.0)
+  --- Carriageway geometry (_L = left carriageway in the image, _R = right) ---
+  ROI_L / ROI_R              measuring zone polygon "x,y;x,y;..." in pixels   (required)
+  CALIB_L / CALIB_R          4 ground points "x,y=X,Y;..." pixels → metres    (required)
+  TRIPWIRES_L / TRIPWIRES_R  two road positions "Y1,Y2" in metres            (required)
+  CALIB_WIDTH                frame width the pixel coordinates refer to      (default: 1920)
+  PROCESS_WIDTH              frames are downscaled to this width for detection (default: 960)
 
   --- Lane Labels ---
   LANE_LEFT_LABEL    e.g. "to_Elefsina"          (default: left_lane)
   LANE_RIGHT_LABEL   e.g. "to_Athens_Airport"    (default: right_lane)
+
+  --- Live Preview (read by the dashboard service) ---
+  FRAME_DIR          directory for the annotated preview JPEG   (default: disabled)
+  PREVIEW_FPS        max preview frames written per second      (default: 5)
 """
 
 import os
@@ -82,50 +88,50 @@ if not _ENV_VIDEO:
     log.error("INPUT_VIDEO environment variable is not set. Exiting.")
     sys.exit(1)
 
-# ---------------------------------------------------------------------------
-# Camera geometry & calibration — all tunable via env vars
-# ---------------------------------------------------------------------------
-# X-coordinate that splits the two carriageways (always X-based on position)
-SPLIT_COORD = int(os.getenv("SPLIT_COORD", "640"))
-
-# Vertical tripwires: X positions where vehicles cross
-# Left carriageway:  cars move RIGHT→LEFT, so LINE_L1 > LINE_L2
-LINE_L1 = int(os.getenv("LINE_L1_COORD", "580"))   # left-moving: first cross (higher X)
-LINE_L2 = int(os.getenv("LINE_L2_COORD", "100"))   # left-moving: second cross (lower X)
-# Right carriageway: cars move LEFT→RIGHT, so LINE_R1 < LINE_R2
-LINE_R1 = int(os.getenv("LINE_R1_COORD", "700"))   # right-moving: first cross (lower X)
-LINE_R2 = int(os.getenv("LINE_R2_COORD", "1180"))  # right-moving: second cross (higher X)
-
-# Real-world distance between the two tripwires (metres).
-# Tune this value for each camera by measuring a known ground feature.
-DIST_M = float(os.getenv("DIST_REAL_M", "28.0"))
-
-# Pixel-to-metre scaling for displacement fallback speed.
-# Estimate: (visible road length in m) / (visible pixel width per carriageway)
-# e.g. 40 m road visible across 640 px → 640/40 = 16.0
-PIXELS_PER_METER = float(os.getenv("PIXELS_PER_METER", "16.0"))
-
-# Human-readable direction labels for each carriageway side
+# Human-readable direction labels for each carriageway
 LANE_LEFT_LABEL  = os.getenv("LANE_LEFT_LABEL",  "left_lane")
 LANE_RIGHT_LABEL = os.getenv("LANE_RIGHT_LABEL", "right_lane")
+
+# Calibration pixels are measured on a CALIB_WIDTH-wide frame; detection runs
+# on frames downscaled to PROCESS_WIDTH (≈4× cheaper than full HD)
+CALIB_WIDTH   = int(os.getenv("CALIB_WIDTH", "1920"))
+PROCESS_WIDTH = int(os.getenv("PROCESS_WIDTH", "960"))
+SCALE         = PROCESS_WIDTH / CALIB_WIDTH
+
+# ---------------------------------------------------------------------------
+# Live preview — annotated JPEG overwritten a few times per second
+# ---------------------------------------------------------------------------
+FRAME_DIR   = os.getenv("FRAME_DIR", "")                # empty = preview disabled
+PREVIEW_FPS = float(os.getenv("PREVIEW_FPS", "5"))
+# The dashboard derives the same file name from CAMERA_NAME
+FRAME_PATH  = (os.path.join(FRAME_DIR, re.sub(r"[^\w.-]", "_", CAMERA_NAME) + ".jpg")
+               if FRAME_DIR and PREVIEW_FPS > 0 else "")
 
 # ---------------------------------------------------------------------------
 # Tracking constants
 # ---------------------------------------------------------------------------
-FPS            = 25.0
-MIN_AREA       = 1_500     # min contour area (px²) to be considered a vehicle
-TRUCK_MIN_AREA = 9_000     # bounding-box area threshold for truck vs car
-MAX_LOST       = 12        # frames before a track is dropped
-MAX_DIST       = 180       # max pixel distance for track matching
+FPS               = 25.0     # used only if the stream has no timestamps
+MIN_AREA_M2       = 5.0      # apparent ground area (m²) below which a blob is noise
+# A vehicle's apparent area depends on the view angle, its distance and road spray,
+# so sizes are judged against the running median of the same zone (mostly cars):
+FRAGMENT_FACTOR   = 0.4      # below 0.4 × median: part of a vehicle / spray — not saved
+TRUCK_FACTOR      = 1.8      # above 1.8 × median: truck
+SIZE_REF_LEN      = 200      # vehicles in the running median
+MAX_LOST          = 12       # frames before a track is dropped
+MAX_DIST          = 180 * PROCESS_WIDTH / 1280   # max pixel distance for track matching
+EDGE_MARGIN_PX    = 2        # boxes this close to the frame edge are cut off — skip them
 
-DISP_WINDOW    = 10        # frames of x-position history for displacement speed
-DISP_MIN_PTS   = 8         # min history points before computing displacement speed
-DISP_SPD_MIN   = 5.0       # km/h  — ignore slower readings (noise)
-DISP_SPD_MAX   = 200.0     # km/h  — cap unreasonably high values
+HIST_LEN        = 50         # road positions kept per track (~2 s)
+DISP_MIN_PTS    = 8          # fallback speed needs at least this many positions…
+DISP_MIN_SPAN_S = 0.4        # …spanning at least this many seconds…
+DISP_MIN_TRAVEL = 10.0       # …and at least this many metres travelled
+DISP_MAX_RESID  = 1.5        # m — a noisier fit means the ground point jumped (blob merge)
+TRIPWIRE_TOL    = 0.35       # reject a tripwire speed this far (±35 %) from the fitted speed
+SPD_MIN         = 5.0        # km/h — ignore slower readings (noise)
+SPD_MAX         = 200.0      # km/h — discard unreasonably high values
+MOVE_MIN_M      = 1.0        # min |ΔY| (m) to call a direction of travel
 
-VEL_THRESHOLD_PX = 10      # min |Δx| over the history window to call a direction
-
-LOG_EVERY_N_FRAMES = 125   # ~5 s at 25 fps
+LOG_EVERY_N_FRAMES = 125     # ~5 s at 25 fps
 
 # ---------------------------------------------------------------------------
 # ipcamlive API
@@ -150,6 +156,77 @@ def get_stream_url(alias: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Carriageway geometry — measuring zone, pixel → road-metre mapping, tripwires
+# ---------------------------------------------------------------------------
+
+def _points(spec: str) -> np.ndarray:
+    """'x,y;x,y;...' → float32 array of shape (n, 2)."""
+    return np.float32([[float(v) for v in p.split(",")] for p in spec.split(";") if p.strip()])
+
+
+class Carriageway:
+    """One side of the road.  All pixel coordinates are in processing resolution."""
+
+    def __init__(self, side: str, label: str, roi: str, calib: str, tripwires: str):
+        self.side  = side
+        self.label = label
+        self.roi   = _points(roi) * SCALE
+
+        pairs = [p.split("=") for p in calib.split(";") if p.strip()]
+        if len(pairs) != 4 or any(len(p) != 2 for p in pairs):
+            raise ValueError("CALIB needs exactly 4 'x,y=X,Y' pairs")
+        img_pts  = _points(";".join(p[0] for p in pairs)) * SCALE
+        road_pts = _points(";".join(p[1] for p in pairs))
+        self.H     = cv2.getPerspectiveTransform(img_pts, road_pts)
+        self.H_inv = np.linalg.inv(self.H)
+
+        self.wires = tuple(float(v) for v in tripwires.split(","))
+        if len(self.wires) != 2:
+            raise ValueError("TRIPWIRES needs two values 'Y1,Y2'")
+        # Tripwires drawn across the calibrated width of the road
+        x0, x1 = float(road_pts[:, 0].min()), float(road_pts[:, 0].max())
+        self.wire_segments = [self.to_image([(x0, y), (x1, y)]) for y in self.wires]
+
+        self.sizes = deque(maxlen=SIZE_REF_LEN)   # apparent areas of recent vehicles
+
+    def contains(self, pt: tuple) -> bool:
+        return cv2.pointPolygonTest(self.roi, pt, False) >= 0
+
+    def to_road(self, pts) -> np.ndarray:
+        """Image points (n, 2) → road metres (n, 2)."""
+        return cv2.perspectiveTransform(np.float64(pts).reshape(1, -1, 2), self.H)[0]
+
+    def to_image(self, pts) -> np.ndarray:
+        """Road metres (n, 2) → image points (n, 2)."""
+        return cv2.perspectiveTransform(np.float64(pts).reshape(1, -1, 2), self.H_inv)[0]
+
+    def area_m2(self, x: int, y: int, w: int, h: int) -> float:
+        """Apparent ground area of a bounding box, using the local scale at its base."""
+        bx, by = x + w / 2, y + h
+        p0, px, py = self.to_road([(bx, by), (bx + 1, by), (bx, by + 1)])
+        (ax, ay), (cx, cy) = px - p0, py - p0
+        return w * h * abs(ax * cy - ay * cx)
+
+
+def _load_carriageway(side: str, label: str) -> Carriageway:
+    names  = [f"ROI_{side}", f"CALIB_{side}", f"TRIPWIRES_{side}"]
+    values = [os.getenv(n, "") for n in names]
+    missing = [n for n, v in zip(names, values) if not v]
+    if missing:
+        log.error("Calibration env vars not set: %s. Exiting.", ", ".join(missing))
+        sys.exit(1)
+    try:
+        return Carriageway(side, label, *values)
+    except (ValueError, cv2.error) as exc:
+        log.error("Invalid calibration for carriageway %s: %s. Exiting.", side, exc)
+        sys.exit(1)
+
+
+CARRIAGEWAYS = [_load_carriageway("L", LANE_LEFT_LABEL),
+                _load_carriageway("R", LANE_RIGHT_LABEL)]
+
+
+# ---------------------------------------------------------------------------
 # SQLite — schema & helpers
 # ---------------------------------------------------------------------------
 
@@ -158,6 +235,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
+    # speed_alerts belongs to the alerts consumer (Spark/alerts_consumer.py)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS vehicle_events (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,26 +244,14 @@ def init_db(db_path: str) -> sqlite3.Connection:
             vehicle_type  TEXT    NOT NULL,
             speed_kmh     REAL,
             direction     TEXT    NOT NULL,   -- named road direction (e.g. "to_Elefsina")
-            movement      TEXT,               -- detected movement: "left"|"right"|"unknown"
+            movement      TEXT,               -- detected movement: "away"|"toward"|"unknown"
             speed_source  TEXT    NOT NULL,   -- "tripwire"|"displacement"
             recorded_at   TEXT    NOT NULL    -- ISO-8601 UTC
-        );
-
-        CREATE TABLE IF NOT EXISTS speed_alerts (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            camera_name   TEXT    NOT NULL,
-            vehicle_id    TEXT    NOT NULL,
-            vehicle_type  TEXT    NOT NULL,
-            speed_kmh     REAL    NOT NULL,
-            direction     TEXT    NOT NULL,
-            alerted_at    TEXT    NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_ve_cam    ON vehicle_events (camera_name);
         CREATE INDEX IF NOT EXISTS idx_ve_speed  ON vehicle_events (speed_kmh);
         CREATE INDEX IF NOT EXISTS idx_ve_dir    ON vehicle_events (direction);
-        CREATE INDEX IF NOT EXISTS idx_alert_cam ON speed_alerts   (camera_name);
-        CREATE INDEX IF NOT EXISTS idx_alert_dir ON speed_alerts   (direction);
     """)
     conn.commit()
     log.info("SQLite ready at %s", db_path)
@@ -208,22 +274,6 @@ def insert_event(conn: sqlite3.Connection, camera: str, vehicle_id: str,
     conn.commit()
 
 
-def insert_alert(conn: sqlite3.Connection, camera: str, vehicle_id: str,
-                 vehicle_type: str, speed_kmh: float, direction: str) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """INSERT INTO speed_alerts
-               (camera_name, vehicle_id, vehicle_type, speed_kmh, direction, alerted_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (camera, vehicle_id, vehicle_type, round(speed_kmh, 2), direction, now),
-    )
-    conn.commit()
-    log.warning(
-        "⚠  SPEED ALERT  |  cam=%-20s  %s %s  |  %.1f km/h  |  %s",
-        camera, vehicle_type.upper(), vehicle_id, speed_kmh, direction,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Tracker helpers
 # ---------------------------------------------------------------------------
@@ -232,17 +282,16 @@ def init_tracker() -> dict:
     return {"next_id": 0, "centroids": {}, "lost": defaultdict(int)}
 
 
-def update_tracker(tracker: dict, boxes: list) -> dict:
+def update_tracker(tracker: dict, new_pts: list) -> dict:
     """
-    Match bounding boxes to existing tracks (nearest-centroid).
-    Uses centre-of-box as tracking point (better for side-view cameras).
+    Match detection points to existing tracks (nearest point first).
+    Tracks unmatched for more than MAX_LOST frames are dropped; the returned
+    dict still holds tracks that were missed this frame (at their last point).
     """
     centroids = tracker["centroids"]
     lost      = tracker["lost"]
-    # Centre point of each detection
-    new_pts = [(int(x + w // 2), int(y + h // 2)) for x, y, w, h in boxes]
 
-    if not boxes:
+    if not new_pts:
         for tid in list(centroids):
             lost[tid] += 1
             if lost[tid] > MAX_LOST:
@@ -296,99 +345,199 @@ def update_tracker(tracker: dict, boxes: list) -> dict:
     return dict(centroids)
 
 
-# ---------------------------------------------------------------------------
-# VERTICAL TRIPWIRE helpers (X-based, for horizontal vehicle motion)
-# ---------------------------------------------------------------------------
-
-def init_tripwire(line_first: int, line_second: int, dist_m: float) -> dict:
-    """
-    line_first / line_second are X pixel positions (vertical lines).
-    Vehicles are expected to cross line_first before line_second.
-      Left-moving  → line_first > line_second  (high X first, then low X)
-      Right-moving → line_first < line_second  (low X first, then high X)
-    """
+def new_track() -> dict:
     return {
-        "prev_x":        {},   # previous X position per track id
-        "crossed_first": {},   # frame number when line_first was crossed
-        "speed":         {},   # measured tripwire speed (km/h)
-        "line_first":  line_first,
-        "line_second": line_second,
-        "dist_m":      dist_m,
+        "hist":   deque(maxlen=HIST_LEN),   # (t, X, Y) road positions
+        "areas":  deque(maxlen=HIST_LEN),   # apparent ground areas (m²)
+        "cross":  {},                       # tripwire index → crossing time (s)
+        "speed":  None,                     # tripwire speed (km/h)
+        "saved":  False,
     }
 
 
-def _x_crossed(prev_x: float, cur_x: float, line_x: int) -> bool:
-    """True if a vertical line at line_x was crossed between the two frames."""
-    return (prev_x < line_x <= cur_x) or (cur_x < line_x <= prev_x)
-
-
-def update_tripwire(tw: dict, tracked: dict, frame_id: int,
-                    cam: str = "", direction_label: str = "") -> None:
-    """Detect vertical-line crossings and compute speed when both lines are hit."""
-    for tid, (cx, _cy) in tracked.items():
-        prev = tw["prev_x"].get(tid)
-        tw["prev_x"][tid] = cx
-        if prev is None:
-            continue
-
-        if tid not in tw["crossed_first"]:
-            if _x_crossed(prev, cx, tw["line_first"]):
-                tw["crossed_first"][tid] = frame_id
-                log.debug(
-                    "[%s] id=%s%d crossed line-1 @ x=%d (frame=%d)",
-                    cam, "L" if direction_label == LANE_LEFT_LABEL else "R",
-                    tid, tw["line_first"], frame_id,
-                )
-        elif tid not in tw["speed"]:
-            if _x_crossed(prev, cx, tw["line_second"]):
-                elapsed = (frame_id - tw["crossed_first"][tid]) / FPS
-                if elapsed > 0:
-                    spd = (tw["dist_m"] / elapsed) * 3.6
-                    tw["speed"][tid] = spd
-                    log.info(
-                        "[%s] 📍 TRIPWIRE  vehicle=%s%d  speed=%.1f km/h"
-                        "  dir=%-25s  elapsed=%.2fs",
-                        cam,
-                        "L" if direction_label == LANE_LEFT_LABEL else "R",
-                        tid, spd, direction_label, elapsed,
-                    )
-
-
 # ---------------------------------------------------------------------------
-# Displacement-based fallback speed (X-axis pixel tracking)
+# Speed estimation (road metres)
 # ---------------------------------------------------------------------------
 
-def compute_displacement_speed(x_positions: list[float]) -> float | None:
+def _crossed(prev: float, cur: float, line: float) -> bool:
+    """True if the road position `line` was passed between the two samples."""
+    return (prev < line <= cur) or (cur < line <= prev)
+
+
+def update_crossings(track: dict, cw: Carriageway, t: float, y: float) -> None:
     """
-    Estimate speed from the X-pixel displacement over DISP_WINDOW frames.
-    Returns km/h or None if the window is insufficient or speed is out of range.
+    Record interpolated tripwire crossing times; set the speed once both are
+    crossed.  The result is kept only if a clean fit of the same track agrees
+    with it — blob merges and ID switches make the ground point jump.
     """
-    if len(x_positions) < DISP_MIN_PTS:
+    if not track["hist"]:
+        return
+    t0, _, y0 = track["hist"][-1]
+    for i, line in enumerate(cw.wires):
+        if i not in track["cross"] and _crossed(y0, y, line):
+            track["cross"][i] = t0 + (line - y0) / (y - y0) * (t - t0)
+    if len(track["cross"]) == 2 and track["speed"] is None:
+        elapsed = abs(track["cross"][1] - track["cross"][0])
+        if elapsed > 0:
+            spd = abs(cw.wires[1] - cw.wires[0]) / elapsed * 3.6
+            fitted = fallback_speed(track["hist"], min_travel=0)
+            if fitted is not None and abs(spd - fitted) <= TRIPWIRE_TOL * fitted:
+                track["speed"] = spd
+
+
+def fallback_speed(hist, min_travel: float = DISP_MIN_TRAVEL) -> float | None:
+    """Least-squares speed over the track's recent road positions (km/h)."""
+    if len(hist) < DISP_MIN_PTS:
         return None
-    dx = abs(x_positions[-1] - x_positions[0])
-    frames = len(x_positions) - 1
-    px_per_frame = dx / frames
-    spd = (px_per_frame / PIXELS_PER_METER) * FPS * 3.6
-    return spd if DISP_SPD_MIN < spd < DISP_SPD_MAX else None
+    t, x, y = np.array(hist).T
+    if t[-1] - t[0] < DISP_MIN_SPAN_S or abs(y[-1] - y[0]) < min_travel:
+        return None
+    vy, y0 = np.polyfit(t, y, 1)
+    if np.sqrt(np.mean((y - (vy * t + y0)) ** 2)) > DISP_MAX_RESID:
+        return None
+    vx = np.polyfit(t, x, 1)[0]
+    spd = float(np.hypot(vx, vy)) * 3.6
+    return spd if SPD_MIN < spd < SPD_MAX else None
 
 
-def detect_movement(x_positions: list[float]) -> str:
-    """
-    Determine if a vehicle is moving left, right, or can't be determined.
-
-    Returns:
-        "left"    – clearly moving toward lower X values
-        "right"   – clearly moving toward higher X values
-        "unknown" – insufficient data or near-stationary
-    """
-    if len(x_positions) < 4:
+def detect_movement(hist) -> str:
+    """'away' / 'toward' the camera, or 'unknown' if the track barely moved."""
+    if len(hist) < 2:
         return "unknown"
-    dx = x_positions[-1] - x_positions[0]
-    if dx > VEL_THRESHOLD_PX:
-        return "right"
-    if dx < -VEL_THRESHOLD_PX:
-        return "left"
+    dy = hist[-1][2] - hist[0][2]
+    if dy > MOVE_MIN_M:
+        return "away"
+    if dy < -MOVE_MIN_M:
+        return "toward"
     return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Live preview helpers
+# ---------------------------------------------------------------------------
+PREVIEW_MAX_W = 1280      # previews are downscaled to this width
+
+_FONT   = cv2.FONT_HERSHEY_SIMPLEX
+_GREEN  = (80, 220, 80)     # BGR
+_RED    = (60, 60, 255)
+_YELLOW = (0, 210, 255)
+_GREY   = (170, 170, 170)
+_WHITE  = (255, 255, 255)
+_ZONE   = {"L": (255, 200, 0), "R": (255, 120, 255)}
+
+
+def _text(frame: np.ndarray, text: str, org: tuple, color: tuple, k: float) -> None:
+    """Text sized for the frame (k = width / 1280) with a dark outline for contrast."""
+    scale, thick = 0.7 * k, max(1, round(2 * k))
+    org = (int(org[0]), int(org[1]))
+    cv2.putText(frame, text, org, _FONT, scale, (0, 0, 0), thick + 3, cv2.LINE_AA)
+    cv2.putText(frame, text, org, _FONT, scale, color, thick, cv2.LINE_AA)
+
+
+def draw_overlay(frame: np.ndarray, rects: list, tracks: list,
+                 n_saved: int, frame_id: int, fps: float) -> None:
+    """
+    Draw the measuring zones, tripwires, detections and tracked vehicles onto
+    the full-resolution frame in place.  rects / tracks are in processing pixels;
+    tracks: (label, x, y, speed_kmh | None).
+    """
+    h, w = frame.shape[:2]
+    k = w / 1280                     # keeps the overlay the same size at any resolution
+    f = w / PROCESS_WIDTH            # processing pixels → frame pixels
+    line_w = max(1, round(2 * k))
+
+    for cw in CARRIAGEWAYS:
+        roi = np.int32(cw.roi * f)
+        cv2.polylines(frame, [roi], True, _ZONE[cw.side], max(1, round(k)), cv2.LINE_AA)
+        for seg in cw.wire_segments:
+            a, b = np.int32(seg * f)
+            cv2.line(frame, tuple(a), tuple(b), _YELLOW, line_w, cv2.LINE_AA)
+        far = roi[np.argmin(roi[:, 1])]           # label the zone at its far end
+        _text(frame, cw.label, (far[0], far[1] - 8 * k), _ZONE[cw.side], k)
+
+    for x, y, bw, bh in rects:
+        x, y, bw, bh = (round(v * f) for v in (x, y, bw, bh))
+        cv2.rectangle(frame, (x, y), (x + bw, y + bh), _GREY, max(1, round(k)))
+
+    for label, px, py, speed in tracks:
+        color = _RED if speed is not None and speed > ALERT_SPEED else _GREEN
+        if speed is not None:
+            label = f"{label} {speed:.0f} km/h"
+        cx, cy = round(px * f), round(py * f)
+        cv2.circle(frame, (cx, cy), round(5 * k), color, -1)
+        _text(frame, label, (cx + 8 * k, cy - 8 * k), color, k)
+
+    cv2.rectangle(frame, (0, 0), (w, round(34 * k)), (0, 0, 0), -1)
+    _text(frame,
+          f"{CAMERA_NAME}   active {len(tracks)}   saved {n_saved}   frame {frame_id}"
+          f"   {fps:.0f} fps   {datetime.now(timezone.utc):%H:%M:%S} UTC",
+          (10 * k, 24 * k), _WHITE, k)
+
+
+def write_preview(frame: np.ndarray, path: str) -> None:
+    """Replace the preview JPEG atomically so readers never see a partial file."""
+    h, w = frame.shape[:2]
+    if w > PREVIEW_MAX_W:
+        frame = cv2.resize(frame, (PREVIEW_MAX_W, round(h * PREVIEW_MAX_W / w)),
+                           interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if not ok:
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(buf.tobytes())
+    os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------
+# Persistence of a finished measurement
+# ---------------------------------------------------------------------------
+
+def save_vehicle(conn: sqlite3.Connection, cw: Carriageway, tid: int, track: dict,
+                 speed: float, source: str) -> bool:
+    """Store one vehicle in SQLite and publish it to Kafka; False if it was a fragment."""
+    vid  = f"{cw.side}{tid}"
+    # Smallest readings are taken closest to the camera, with the least height distortion
+    area = float(np.percentile(track["areas"], 25))
+    cw.sizes.append(area)
+    typical = float(np.median(cw.sizes))
+    track["saved"] = True
+    if area < FRAGMENT_FACTOR * typical:
+        log.info("[%s] discarded %s: %.0fm² vs typical %.0fm² — fragment, not a vehicle",
+                 CAMERA_NAME, vid, area, typical)
+        return False
+
+    vtype    = "truck" if area > TRUCK_FACTOR * typical else "car"
+    movement = detect_movement(track["hist"])
+
+    insert_event(conn, CAMERA_NAME, vid, vtype, speed, cw.label, movement, source)
+    log.info(
+        "[%s] ✅ SAVED  id=%-4s  type=%-5s  speed=%6.1f km/h"
+        "  dir=%-25s  movement=%-7s  src=%-12s  area=%.0fm²",
+        CAMERA_NAME, vid, vtype, speed, cw.label, movement, source, area,
+    )
+    if speed > ALERT_SPEED:
+        log.warning(
+            "[%s] ⚠  SPEED ALERT  %s %s  |  %.1f km/h  |  %s",
+            CAMERA_NAME, vtype.upper(), vid, speed, cw.label,
+        )
+
+    if _KAFKA_ENABLED:
+        # Stream time when the vehicle reached its first tripwire (or was first seen)
+        entry_t = min(track["cross"].values()) if source == "tripwire" else track["hist"][0][0]
+        try:
+            kafka_producer.publish_vehicle_event(
+                vehicle_id=vid,
+                vehicle_type=vtype,
+                speed_kmh=speed,
+                carriageway=cw.label,
+                segment=CAMERA_NAME,
+                timestamp_s=entry_t,
+                speed_source=source,
+            )
+        except Exception as exc:
+            log.error("Kafka publish error: %s", exc)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -413,18 +562,20 @@ def main() -> None:
     log.info("=" * 70)
     log.info("Camera     : %s", CAMERA_NAME)
     log.info("Stream     : %s", video_path)
-    log.info("Split X    : %d px  (left < %d = %s, right >= %d = %s)",
-             SPLIT_COORD, SPLIT_COORD, LANE_LEFT_LABEL, SPLIT_COORD, LANE_RIGHT_LABEL)
-    log.info("Tripwires (LEFT  %-25s): X=%d → X=%d  dist=%.1f m",
-             LANE_LEFT_LABEL, LINE_L1, LINE_L2, DIST_M)
-    log.info("Tripwires (RIGHT %-25s): X=%d → X=%d  dist=%.1f m",
-             LANE_RIGHT_LABEL, LINE_R1, LINE_R2, DIST_M)
-    log.info("px/m       : %.1f  (displacement fallback calibration)", PIXELS_PER_METER)
+    for cw in CARRIAGEWAYS:
+        log.info("Zone %s     : %-25s tripwires at %.0f m and %.0f m (%.0f m apart)",
+                 cw.side, cw.label, cw.wires[0], cw.wires[1],
+                 abs(cw.wires[1] - cw.wires[0]))
+    log.info("Processing : %d px wide (calibration measured at %d px)",
+             PROCESS_WIDTH, CALIB_WIDTH)
     log.info("Alert ≥    : %.0f km/h", ALERT_SPEED)
     log.info("DB         : %s", DB_PATH)
+    log.info("Preview    : %s", f"{FRAME_PATH} ({PREVIEW_FPS:g} fps)" if FRAME_PATH else "disabled")
     log.info("=" * 70)
 
     conn = init_db(DB_PATH)
+    if FRAME_PATH:
+        os.makedirs(FRAME_DIR, exist_ok=True)
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -433,33 +584,28 @@ def main() -> None:
 
     frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    log.info("Stream opened: %dx%d", frame_w, frame_h)
+    stream_fps = cap.get(cv2.CAP_PROP_FPS) or FPS
+    log.info("Stream opened: %dx%d @ %.1f fps", frame_w, frame_h, stream_fps)
 
-    # Background subtractor + morphology kernels
+    # Background subtractor + morphology kernels (sizes tuned at 1280 px width)
+    def kernel(shape: int, size: int) -> np.ndarray:
+        n = max(3, round(size * PROCESS_WIDTH / 1280) | 1)
+        return cv2.getStructuringElement(shape, (n, n))
+
     bg       = cv2.createBackgroundSubtractorMOG2(history=150, varThreshold=40, detectShadows=True)
-    k_small  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    k_medium = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-    k_large  = cv2.getStructuringElement(cv2.MORPH_RECT,    (15, 15))
+    k_small  = kernel(cv2.MORPH_ELLIPSE, 3)
+    k_medium = kernel(cv2.MORPH_ELLIPSE, 11)
+    k_large  = kernel(cv2.MORPH_RECT,    15)
 
-    # Trackers — one per carriageway
-    tr_left  = init_tracker()
-    tr_right = init_tracker()
+    trackers = {cw.side: init_tracker() for cw in CARRIAGEWAYS}
+    tracks: dict = {}          # (side, tid) → track state
+    n_saved  = 0
+    frame_id = 0
 
-    # Vertical tripwires
-    # Left-side  vehicles move  RIGHT→LEFT : LINE_L1 (higher X) crossed first
-    # Right-side vehicles move  LEFT→RIGHT : LINE_R1 (lower  X) crossed first
-    tw_left  = init_tripwire(LINE_L1, LINE_L2, DIST_M)
-    tw_right = init_tripwire(LINE_R1, LINE_R2, DIST_M)
-
-    seen_left:  set = set()
-    seen_right: set = set()
-
-    vehicle_type: dict = {}                                    # key → "car"|"truck"
-    x_hist       = defaultdict(lambda: deque(maxlen=DISP_WINDOW))  # key → deque of X positions
-    disp_speed:  dict = {}                                     # key → float km/h (fallback)
-
-    saved_ids: set = set()   # (camera, vid) pairs already persisted this session
-    frame_id  = 0
+    preview_path = FRAME_PATH
+    last_preview = 0.0
+    proc_fps     = 0.0
+    fps_t0, fps_f0 = time.monotonic(), 0
 
     log.info("Processing stream — press Ctrl+C to stop.\n")
 
@@ -480,157 +626,100 @@ def main() -> None:
                 if not cap.isOpened():
                     log.error("Reconnect failed. Waiting 30 s …")
                     time.sleep(30)
+                # Timestamps restart with the new stream — start tracking afresh
+                trackers = {cw.side: init_tracker() for cw in CARRIAGEWAYS}
+                tracks.clear()
                 continue
 
             frame_id += 1
+            pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            t = pos_ms / 1000 if pos_ms > 0 else frame_id / stream_fps
 
-            # ── Background subtraction ──────────────────────────────────────
-            fg = bg.apply(frame)
+            # ── Background subtraction (downscaled) ─────────────────────────
+            h, w = frame.shape[:2]
+            small = cv2.resize(frame, (PROCESS_WIDTH, round(h * PROCESS_WIDTH / w)),
+                               interpolation=cv2.INTER_AREA)
+            small_h = small.shape[0]
+            fg = bg.apply(small)
             _, fg = cv2.threshold(fg, 200, 255, cv2.THRESH_BINARY)
             fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN,  k_small)
             fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k_medium)
             fg = cv2.dilate(fg, k_large)
 
             cnts, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            all_rects = [cv2.boundingRect(c) for c in cnts if cv2.contourArea(c) >= MIN_AREA]
+            all_rects = [cv2.boundingRect(c) for c in cnts]
+            zone_rects = []
 
-            # Split detections by carriageway (centre X vs SPLIT_COORD)
-            rects_l = [r for r in all_rects if (r[0] + r[2] // 2) <  SPLIT_COORD]
-            rects_r = [r for r in all_rects if (r[0] + r[2] // 2) >= SPLIT_COORD]
+            for cw in CARRIAGEWAYS:
+                # ── Detections in this measuring zone (base-centre = ground point)
+                dets = {}
+                for x, y, bw, bh in all_rects:
+                    # A box cut off by the frame edge has no reliable ground point
+                    if (x <= EDGE_MARGIN_PX or x + bw >= PROCESS_WIDTH - EDGE_MARGIN_PX
+                            or y + bh >= small_h - EDGE_MARGIN_PX):
+                        continue
+                    pt = (x + bw / 2, y + bh)
+                    if cw.contains(pt):
+                        area = cw.area_m2(x, y, bw, bh)
+                        if area >= MIN_AREA_M2:
+                            dets[pt] = area
+                            zone_rects.append((x, y, bw, bh))
 
-            # ── Update trackers ─────────────────────────────────────────────
-            active_l = update_tracker(tr_left,  rects_l)
-            active_r = update_tracker(tr_right, rects_r)
+                active = update_tracker(trackers[cw.side], list(dets))
 
-            # Log first appearance of each vehicle
-            for tid in active_l:
-                if tid not in seen_left:
-                    seen_left.add(tid)
-                    log.info("[%s] 🔵 NEW vehicle  id=L%d  side=%s  frame=%d",
-                             CAMERA_NAME, tid, LANE_LEFT_LABEL, frame_id)
-            for tid in active_r:
-                if tid not in seen_right:
-                    seen_right.add(tid)
-                    log.info("[%s] 🔵 NEW vehicle  id=R%d  side=%s  frame=%d",
-                             CAMERA_NAME, tid, LANE_RIGHT_LABEL, frame_id)
+                for tid, pt in active.items():
+                    key = (cw.side, tid)
+                    track = tracks.get(key)
+                    if track is None:
+                        track = tracks[key] = new_track()
+                        log.info("[%s] 🔵 NEW vehicle  id=%s%d  side=%s  frame=%d",
+                                 CAMERA_NAME, cw.side, tid, cw.label, frame_id)
+                    if pt not in dets:
+                        continue   # missed this frame; the tracker keeps it alive
 
-            # ── Tripwire speed detection ─────────────────────────────────────
-            update_tripwire(tw_left,  active_l, frame_id,
-                            cam=CAMERA_NAME, direction_label=LANE_LEFT_LABEL)
-            update_tripwire(tw_right, active_r, frame_id,
-                            cam=CAMERA_NAME, direction_label=LANE_RIGHT_LABEL)
+                    road_x, road_y = cw.to_road([pt])[0]
+                    update_crossings(track, cw, t, road_y)
+                    track["hist"].append((t, road_x, road_y))
+                    track["areas"].append(dets[pt])
 
-            # ── X-displacement speed (fallback) + vehicle size classification
-            for side, active, rects, side_label in [
-                ("L", active_l, rects_l, LANE_LEFT_LABEL),
-                ("R", active_r, rects_r, LANE_RIGHT_LABEL),
-            ]:
-                for tid, (cx, cy) in active.items():
-                    key = (side, tid)
-                    x_hist[key].append(float(cx))
-                    pts = list(x_hist[key])
+                    if track["speed"] is not None and not track["saved"]:
+                        log.info("[%s] 📍 TRIPWIRE  vehicle=%s%d  speed=%.1f km/h  dir=%s",
+                                 CAMERA_NAME, cw.side, tid, track["speed"], cw.label)
+                        n_saved += save_vehicle(conn, cw, tid, track, track["speed"], "tripwire")
 
-                    spd = compute_displacement_speed(pts)
-                    if spd is not None:
-                        prev = disp_speed.get(key)
-                        disp_speed[key] = spd
-                        if prev is None:  # log the first estimate only
-                            log.info(
-                                "[%s] 📡 DISP speed   vehicle=%s%d  speed=%.1f km/h  dir=%s",
-                                CAMERA_NAME, side, tid, spd, side_label,
-                            )
+                # ── Tracks that just ended: fall back to the fitted speed ───
+                for key in [k for k in tracks if k[0] == cw.side and k[1] not in active]:
+                    track = tracks.pop(key)
+                    if not track["saved"]:
+                        spd = fallback_speed(track["hist"])
+                        if spd is not None:
+                            n_saved += save_vehicle(conn, cw, key[1], track, spd, "displacement")
 
-                    # Classify vehicle by bounding-box area
-                    if rects:
-                        rect = min(
-                            rects,
-                            key=lambda r: abs(cx - (r[0] + r[2] // 2))
-                                        + abs(cy - (r[1] + r[3] // 2)),
-                        )
-                        vehicle_type[key] = (
-                            "truck" if rect[2] * rect[3] >= TRUCK_MIN_AREA else "car"
-                        )
+            # ── Live preview frame for the dashboard ────────────────────────
+            if preview_path and time.monotonic() - last_preview >= 1 / PREVIEW_FPS:
+                last_preview = time.monotonic()
+                shown = [
+                    (f"{side}{tid}", *trackers[side]["centroids"][tid],
+                     tr["speed"] or fallback_speed(tr["hist"]))
+                    for (side, tid), tr in tracks.items() if tr["hist"]
+                ]
+                draw_overlay(frame, zone_rects, shown, n_saved, frame_id, proc_fps)
+                try:
+                    write_preview(frame, preview_path)
+                except OSError as exc:
+                    log.warning("Preview write failed (%s) — preview disabled.", exc)
+                    preview_path = ""
 
-            # ── Persist newly resolved speeds ────────────────────────────────
-            for side, tw, side_label in [
-                ("L", tw_left,  LANE_LEFT_LABEL),
-                ("R", tw_right, LANE_RIGHT_LABEL),
-            ]:
-                seen_tids = (
-                    set(tw["speed"])
-                    | {tid for (s, tid) in vehicle_type if s == side}
-                    | {tid for (s, tid) in disp_speed   if s == side}
-                )
-                for tid in seen_tids:
-                    key    = (side, tid)
-                    vid    = f"{side}{tid}"
-                    db_key = (CAMERA_NAME, vid)
-                    if db_key in saved_ids:
-                        continue   # already saved this session
-
-                    spd_tw   = tw["speed"].get(tid)
-                    spd_disp = disp_speed.get(key)
-                    if spd_tw is not None:
-                        speed, source = spd_tw, "tripwire"
-                    elif spd_disp is not None:
-                        speed, source = spd_disp, "displacement"
-                    else:
-                        continue   # no speed estimate yet
-
-                    vtype    = vehicle_type.get(key, "unknown")
-                    movement = detect_movement(list(x_hist.get(key, [])))
-
-                    # ── SQLite ─────────────────────────────────────────────
-                    insert_event(conn, CAMERA_NAME, vid, vtype,
-                                 speed, side_label, movement, source)
-                    saved_ids.add(db_key)
-
-                    log.info(
-                        "[%s] ✅ SAVED  id=%-4s  type=%-5s  speed=%6.1f km/h"
-                        "  dir=%-25s  movement=%-7s  src=%s",
-                        CAMERA_NAME, vid, vtype, speed,
-                        side_label, movement, source,
-                    )
-
-                    # ── Speed alert (> threshold) ───────────────────────────
-                    if speed > ALERT_SPEED:
-                        insert_alert(conn, CAMERA_NAME, vid, vtype,
-                                     speed, side_label)
-
-                    # ── Kafka ───────────────────────────────────────────────
-                    if _KAFKA_ENABLED:
-                        entry_frame = (tw["crossed_first"].get(tid, 0)
-                                       if source == "tripwire" else 0)
-                        try:
-                            kafka_producer.publish_vehicle_event(
-                                vehicle_id=vid,
-                                vehicle_type=vtype,
-                                speed_kmh=speed,
-                                carriageway=side_label,
-                                segment=CAMERA_NAME,
-                                timestamp_s=entry_frame / FPS,
-                                speed_source=source,
-                            )
-                        except Exception as exc:
-                            log.error("Kafka publish error: %s", exc)
-
-            # ── Periodic active-vehicle snapshot (every ~5 s) ──────────────
+            # ── Periodic snapshot (every ~5 s) ──────────────────────────────
             if frame_id % LOG_EVERY_N_FRAMES == 0:
-                n_active = len(active_l) + len(active_r)
-                n_saved  = len(saved_ids)
-                spd_l = "  ".join(
-                    f"L{t}={v:.0f}" for t, v in tw_left["speed"].items()
-                ) or "—"
-                spd_r = "  ".join(
-                    f"R{t}={v:.0f}" for t, v in tw_right["speed"].items()
-                ) or "—"
+                now = time.monotonic()
+                proc_fps = (frame_id - fps_f0) / (now - fps_t0)
+                fps_t0, fps_f0 = now, frame_id
+                n_left  = sum(1 for side, _ in tracks if side == "L")
+                n_right = len(tracks) - n_left
                 log.info(
-                    "[%s] ⏱  frame=%d  active_l=%d/%s  active_r=%d/%s"
-                    "  saved=%d  tripwire=[%s | %s]",
-                    CAMERA_NAME, frame_id,
-                    len(active_l), LANE_LEFT_LABEL[:12],
-                    len(active_r), LANE_RIGHT_LABEL[:12],
-                    n_saved, spd_l, spd_r,
+                    "[%s] ⏱  frame=%d  %.1f fps  active_l=%d  active_r=%d  saved=%d",
+                    CAMERA_NAME, frame_id, proc_fps, n_left, n_right, n_saved,
                 )
 
     except KeyboardInterrupt:
@@ -646,7 +735,7 @@ def main() -> None:
         conn.close()
         log.info(
             "Session ended. Camera: %s | Frames processed: %d | Events saved: %d",
-            CAMERA_NAME, frame_id, len(saved_ids),
+            CAMERA_NAME, frame_id, n_saved,
         )
 
 

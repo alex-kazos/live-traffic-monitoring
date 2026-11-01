@@ -1,5 +1,5 @@
 """
-producer.py — Kafka producer helper for the Traffic Monitoring pipeline.
+Kafka producer helper for the Traffic Monitoring pipeline.
 
 This module is imported by monitor_traffic.py (the Tracking service) to
 publish per-vehicle detection events to two Kafka topics:

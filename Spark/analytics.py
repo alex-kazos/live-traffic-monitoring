@@ -134,10 +134,7 @@ events = (
     .filter(F.col("speed_kmh").isNotNull())
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Q1 – Speed of every vehicle (streaming print as events arrive)
-# ═══════════════════════════════════════════════════════════════════════════════
-q1 = (
+vehicle_speeds = (
     events.select(
         "vehicle_id",
         "carriageway",
@@ -154,10 +151,7 @@ q1 = (
     .start()
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Q2 – Total vehicle count per lane (complete mode – updated as new data arrives)
-# ═══════════════════════════════════════════════════════════════════════════════
-q2 = (
+vehicle_count = (
     events.groupBy("carriageway")
     .agg(F.approx_count_distinct("vehicle_id").alias("vehicle_count"))
     .writeStream.outputMode("complete")
@@ -169,7 +163,7 @@ q2 = (
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Q3 – Speed violation count
+# Speed violation count
 #       cars  > 90 km/h
 #       trucks > 80 km/h  (bus / motorcycle use the car threshold for simplicity)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -178,7 +172,7 @@ violations = events.filter(
     | ((F.col("vehicle_type") != "truck") & (F.col("speed_kmh") > 90))
 )
 
-q3 = (
+speed_violation = (
     violations.groupBy("carriageway", "vehicle_type")
     .agg(F.count("*").alias("violation_count"))
     .writeStream.outputMode("complete")
@@ -189,10 +183,7 @@ q3 = (
     .start()
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Q5 – Vehicle count per lane per 5-minute window
-# ═══════════════════════════════════════════════════════════════════════════════
-q5 = (
+vehicle_count_5mins = (
     events.withWatermark("event_time", "5 minutes")
     .groupBy(F.window("event_time", "5 minutes"), "carriageway")
     .agg(F.approx_count_distinct("vehicle_id").alias("vehicle_count"))

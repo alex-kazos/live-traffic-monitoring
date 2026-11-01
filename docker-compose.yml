@@ -8,6 +8,7 @@
 #   tracking-roupaki – CV detection + speed from Roupaki Toll Station (cam88)
 #   spark-analytics  – PySpark Structured Streaming: Q1-Q3, Q5-Q6
 #   spark-alerts     – Lightweight kafka-python consumer (Q4: >130 km/h)
+#   dashboard        – Live video, logs and records per camera (http://localhost:8090)
 #
 # KRaft mode eliminates Zookeeper entirely — no more session-timeout crashes.
 # Data persisted to shared SQLite at /data/db/traffic.db (volume: db-data).
@@ -19,6 +20,7 @@ networks:
 
 volumes:
   db-data:     # shared SQLite database volume
+  frames-data: # latest annotated frame per camera, streamed by the dashboard
 
 services:
 
@@ -91,6 +93,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - db-data:/data/db
+      - frames-data:/data/frames
     environment:
       INPUT_VIDEO: "cam231"
       CAMERA_NAME: "IC_Papagou"
@@ -99,16 +102,17 @@ services:
       KAFKA_TOPIC_ALERTS: traffic-alerts
       ALERT_SPEED_KMH: "130"
       DB_PATH: "/data/db/traffic.db"
-      # ── Geometry (1280×720 stream, side-mounted camera)
-      SPLIT_COORD: "640"
-      LINE_L1_COORD: "590"
-      LINE_L2_COORD: "80"
-      LINE_R1_COORD: "690"
-      LINE_R2_COORD: "1200"
-      DIST_REAL_M: "28.0"
-      PIXELS_PER_METER: "16.0"
+      FRAME_DIR: "/data/frames"
+      # ── Geometry (pixels on the 1920×1080 stream → road metres; see Notes/CALIBRATION.md)
+      #    The two carriageways diverge here, so each has its own ground-plane fit.
       LANE_LEFT_LABEL: "to_Katechaki"
+      ROI_L: "74,944;436,933;919,700;696,710"
+      CALIB_L: "73.8,943.7=0,0;435.6,933.1=11.7,0;918.8,699.9=11.7,48;696.1,710.3=0,48"
+      TRIPWIRES_L: "6,42"
       LANE_RIGHT_LABEL: "to_Mesogeia_Vrilissia"
+      ROI_R: "474,1089;1152,938;1262,706;954,747"
+      CALIB_R: "474.4,1088.6=0,0;1152.3,937.7=15.5,0;1262.3,706.0=15.5,42;954.5,746.6=0,42"
+      TRIPWIRES_R: "8,38"
     command: ["python", "-u", "monitor_traffic.py"]
     restart: unless-stopped
 
@@ -124,6 +128,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - db-data:/data/db
+      - frames-data:/data/frames
     environment:
       INPUT_VIDEO: "cam88"
       CAMERA_NAME: "Roupaki_Toll_Station"
@@ -132,16 +137,18 @@ services:
       KAFKA_TOPIC_ALERTS: traffic-alerts
       ALERT_SPEED_KMH: "130"
       DB_PATH: "/data/db/traffic.db"
-      # ── Geometry (1280×720 stream, elevated side view)
-      SPLIT_COORD: "640"
-      LINE_L1_COORD: "570"
-      LINE_L2_COORD: "60"
-      LINE_R1_COORD: "710"
-      LINE_R2_COORD: "1210"
-      DIST_REAL_M: "30.0"
-      PIXELS_PER_METER: "15.0"
+      FRAME_DIR: "/data/frames"
+      # ── Geometry (pixels on the 1920×1080 stream → road metres; see Notes/CALIBRATION.md)
+      #    One ground-plane fit covers both carriageways; the right zone stops
+      #    before the toll-plaza approach, where the lanes fan out.
       LANE_LEFT_LABEL: "to_Elefsina"
+      ROI_L: "-126,979;210,996;695,676;523,680"
+      CALIB_L: "-126.2,978.7=0,0;210.1,995.7=11.7,0;694.8,675.8=11.7,64;523.1,680.1=0,64"
+      TRIPWIRES_L: "8,56"
       LANE_RIGHT_LABEL: "to_Athens_Airport"
+      ROI_R: "216,1207;802,1266;1046,791;672,791"
+      CALIB_R: "150.3,1199.9=0,0;715.9,1257.6=11.5,0;914.6,790.6=11.5,40;638.0,790.6=0,40"
+      TRIPWIRES_R: "13,32"
     command: ["python", "-u", "monitor_traffic.py"]
     restart: unless-stopped
 
@@ -173,6 +180,9 @@ services:
       dockerfile: Spark/Dockerfile
     container_name: spark-alerts
     networks: [traffic-net]
+    # The image defaults to the non-root spark user, which can't write to the
+    # root-owned SQLite volume; this consumer is the only writer of speed_alerts
+    user: root
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -184,4 +194,27 @@ services:
       ALERT_SPEED_KMH: "130"
       DB_PATH: "/data/db/traffic.db"
     command: ["python3", "/app/alerts_consumer.py"]
+    restart: unless-stopped
+
+  # ── Dashboard — live video, logs and records per camera ─────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dashboard/Dockerfile
+    container_name: dashboard
+    networks: [traffic-net]
+    ports:
+      # Localhost only: the container can reach the Docker socket
+      - "127.0.0.1:8090:8000"
+    volumes:
+      - db-data:/data/db
+      - frames-data:/data/frames:ro
+      # Read container logs and status (docker logs / docker ps)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # CAMERA_NAME=container for every tracking service to show
+      CAMERAS: "IC_Papagou=tracking-papagou,Roupaki_Toll_Station=tracking-roupaki"
+      DB_PATH: "/data/db/traffic.db"
+      FRAME_DIR: "/data/frames"
+      ALERT_SPEED_KMH: "130"
     restart: unless-stopped

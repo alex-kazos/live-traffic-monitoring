@@ -13,6 +13,8 @@ A real-time traffic monitoring system built with **Apache Kafka**, **Apache Spar
 
 Stream URLs are resolved dynamically at runtime via the ipcamlive API.
 
+Both cameras look along the motorway, so vehicles move toward or away from them. Each carriageway has a measuring zone and a ground-plane calibration (pixels → road metres) derived from the lane-marking pattern; speed is the time a vehicle takes between two tripwires a known distance apart. See [Notes/CALIBRATION.md](Notes/CALIBRATION.md) for the method and its assumptions.
+
 ---
 
 ## Pipeline overview
@@ -23,6 +25,7 @@ The default `docker-compose.yml` stack runs without Zookeeper and follows this f
 2. The tracking services publish vehicle events to Kafka topics named `traffic-stats` and `traffic-alerts`.
 3. `spark-analytics` reads `traffic-stats` and answers Q1, Q2, Q3, Q5, and Q6.
 4. `spark-alerts` reads `traffic-alerts`, prints real-time alerts, and stores them in SQLite.
+5. `dashboard` shows each tracking instance's annotated live video, logs, and SQLite records.
 
 In short: streams -> tracking -> Kafka -> Spark consumers -> SQLite.
 
@@ -38,12 +41,13 @@ In short: streams -> tracking -> Kafka -> Spark consumers -> SQLite.
 | `tracking-roupaki` | Live vehicle tracking from cam88 (Roupaki Toll Station) |
 | `spark-analytics` | Spark Structured Streaming for Q1, Q2, Q3, Q5, and Q6 |
 | `spark-alerts` | Kafka consumer for Q4 alerts and SQLite persistence |
+| `dashboard` | Web UI on http://localhost:8090 — live video, logs, and records per camera |
 
 ---
 
 ## SQLite Database
 
-The shared SQLite database at `/data/db/traffic.db` (Docker volume `db-data`) is created by the tracking service and reused by the alerts consumer.
+The shared SQLite database at `/data/db/traffic.db` (Docker volume `db-data`) holds two tables: the tracking services write `vehicle_events`, and the alerts consumer is the only writer of `speed_alerts`.
 
 ### `vehicle_events` table
 | Column | Type | Description |
@@ -54,8 +58,8 @@ The shared SQLite database at `/data/db/traffic.db` (Docker volume `db-data`) is
 | `vehicle_type` | TEXT | `car` or `truck` |
 | `speed_kmh` | REAL | Measured speed in km/h |
 | `direction` | TEXT | Road direction label, such as `to_Elefsina` |
-| `movement` | TEXT | Detected movement (`left`, `right`, or `unknown`) |
-| `speed_source` | TEXT | `tripwire` or `displacement` |
+| `movement` | TEXT | Direction of travel relative to the camera (`away`, `toward`, or `unknown`) |
+| `speed_source` | TEXT | `tripwire` (timed between two road lines) or `displacement` (fitted, when a vehicle misses a tripwire) |
 | `recorded_at` | TEXT | ISO-8601 UTC timestamp |
 
 ### `speed_alerts` table
@@ -81,7 +85,7 @@ The shared SQLite database at `/data/db/traffic.db` (Docker volume `db-data`) is
 | Q4 | Real-time alert if >130 km/h | `spark-alerts` — Kafka consumer + SQLite |
 | Q5 | Vehicle count per lane per 5 min | `spark-analytics` — 5-min tumbling window |
 | Q6 | Avg speed per lane per 5 min | `spark-analytics` — windowed avg |
-| Bonus | Perspective-corrected speed | `monitor_traffic.py` — BEV homography |
+| Bonus | Perspective-corrected speed | `monitor_traffic.py` — ground-plane homography per carriageway ([calibration](Notes/CALIBRATION.md)) |
 
 ---
 
@@ -99,6 +103,18 @@ docker compose up --build
 ```
 
 The SQLite database is created automatically in the `db-data` Docker volume.
+
+On Windows, `start_docker.bat` does the same in the background (`docker compose up -d --build`).
+
+### Dashboard
+
+Open **http://localhost:8090**. For each tracking instance it shows:
+
+- **Live video** — the stream with the tracker's overlay: measuring zone per carriageway, tripwires (yellow), detections, and track IDs with speed (red above the alert threshold). The tracker writes an annotated JPEG to the `frames-data` volume up to `PREVIEW_FPS` times per second (default 5).
+- **Records** — the newest `vehicle_events` rows, plus totals, last-5-minute count, and average speed per direction.
+- **Logs** — the container's log output, read through the Docker socket.
+
+To add a camera to the dashboard, add a `CAMERA_NAME=container` pair to `CAMERAS` on the `dashboard` service and give the new tracking service `FRAME_DIR` plus the `frames-data` volume.
 
 ### Inspect the database from the host
 
@@ -139,10 +155,14 @@ traffic-monitoring/
 │   ├── Dockerfile
 │   ├── analytics.py
 │   └── alerts_consumer.py
+├── Dashboard/
+│   ├── Dockerfile
+│   ├── app.py                           # FastAPI: MJPEG video, logs, records API
+│   └── static/                          # index.html, app.js, style.css
 ├── Other/
 │   ├── monitor_traffic_supervision.py   # optional YOLOv8 + ByteTrack variant
 │   ├── get-model.bat                    # downloads the optional model weight
 │   └── requirements.txt                 # optional experiment dependencies
 ├── Split/                               # legacy split-video utilities; not used by docker compose
-└── start_docker.bat                     # legacy launcher for the older split-based workflow
+└── start_docker.bat                     # Windows launcher: docker compose up -d --build
 ```

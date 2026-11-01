@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Traffic Monitoring · Live</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Traffic Monitoring <span>Live dashboard</span></h1>
+    <div class="topbar-meta" id="meta"></div>
+  </header>
+
+  <main class="cameras" id="cameras"></main>
+
+  <template id="camera-template">
+    <section class="camera">
+      <div class="camera-head">
+        <div>
+          <h2 class="camera-name"></h2>
+          <div class="camera-sub"><span class="container-name"></span><span class="uptime"></span></div>
+        </div>
+        <span class="badge off">Connecting…</span>
+      </div>
+
+      <div class="video offline">
+        <img alt="">
+        <div class="video-overlay">Connecting…</div>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><span class="stat-value" data-stat="total">—</span><span class="stat-label">Vehicles recorded</span></div>
+        <div class="stat"><span class="stat-value" data-stat="last_5_min">—</span><span class="stat-label">Last 5 min</span></div>
+        <div class="stat"><span class="stat-value" data-stat="avg_speed_kmh">—</span><span class="stat-label">Avg speed (km/h)</span></div>
+        <div class="stat"><span class="stat-value" data-stat="over_alert">—</span><span class="stat-label alert-label">Over alert speed</span></div>
+      </div>
+      <div class="directions"></div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Records</h3><span class="panel-note">newest first</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>Vehicle</th><th>Type</th><th class="num">Speed</th><th>Direction</th><th>Source</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <p class="empty">No records yet.</p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Logs</h3><span class="panel-note log-note"></span></div>
+        <div class="logs"></div>
+      </div>
+    </section>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
