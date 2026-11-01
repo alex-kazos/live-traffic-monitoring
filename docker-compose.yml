@@ -9,7 +9,8 @@
 #   spark-analytics  – PySpark Structured Streaming: Q1-Q3, Q5-Q6
 #   spark-alerts     – Lightweight kafka-python consumer (Q4: >130 km/h)
 #   dashboard        – Live video, logs and records per camera (http://localhost:8090)
-#   tunnel           – Optional public URL for the dashboard (Cloudflare Quick Tunnel);
+#   local-dashboard  – Live Plotly analytics per camera (http://localhost:8050)
+#   tunnel          – Optional public URL for the dashboard (Cloudflare Quick Tunnel);
 #                      starts only with: docker compose --profile public up
 #   tunnel-domain    – Optional fixed URL on your own domain (named Cloudflare Tunnel);
 #                      starts only with: docker compose --profile domain up
@@ -240,6 +241,26 @@ services:
       DB_PATH: "/data/db/traffic.db"
       FRAME_DIR: "/data/frames"
       ALERT_SPEED_KMH: "130"
+      # "Live analytics" link to local-dashboard; hidden for viewers coming
+      # through a tunnel, since localhost would be their own machine
+      ANALYTICS_URL: "http://localhost:8050"
+    restart: unless-stopped
+
+  # ── Local dashboard — live Plotly analytics per camera ──────────────────────
+  local-dashboard:
+    build:
+      context: .
+      dockerfile: LocalDashboard/Dockerfile
+    container_name: local-dashboard
+    logging: *default-logging
+    networks: [traffic-net]
+    depends_on: [dashboard]
+    ports:
+      - "127.0.0.1:8050:8050"
+    environment:
+      SERVER_URL: "http://dashboard:8000"   # reads the records through the dashboard API
+      LIVE_URL: "http://localhost:8090"     # where the "Live video" link opens
+      TZ: "Europe/Athens"                   # chart times in the cameras' local time
     restart: unless-stopped
 
   # ── Public URL — Cloudflare Quick Tunnel (opt-in) ───────────────────────────

@@ -4,7 +4,7 @@ REM  Traffic Monitoring - Pipeline Launcher
 REM
 REM  Builds and starts every service in docker-compose.yml:
 REM    kafka, kafka-init, tracking-papagou, tracking-roupaki,
-REM    spark-analytics, spark-alerts, dashboard
+REM    spark-analytics, spark-alerts, dashboard, local-dashboard
 REM ============================================================
 
 REM Run from the project root so docker compose finds docker-compose.yml
@@ -28,12 +28,8 @@ echo.
 docker compose ps
 echo.
 echo Dashboard:     http://localhost:8090
+echo Analytics:     http://localhost:8050
 echo Kafka broker:  localhost:9092
-echo.
-echo Live analytics (Plotly, runs outside Docker):
-echo                pip install -r LocalDashboard\requirements.txt   (first time only)
-echo                python LocalDashboard\dashboard.py
-echo                then open http://localhost:8050
 echo.
 echo Follow logs:   docker compose logs -f tracking-papagou tracking-roupaki
 echo                docker compose logs -f spark-analytics

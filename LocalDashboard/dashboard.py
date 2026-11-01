@@ -6,6 +6,9 @@ hours of vehicle records in memory, pulls new ones every few seconds, and charts
 them per camera: average speed and vehicle count per time bin, average speed per
 carriageway and vehicle type, every measured speed, and the over-speed alerts.
 
+docker compose starts it with the rest of the stack (service local-dashboard).
+To run it on its own, for example against the hosted server:
+
     pip install -r LocalDashboard/requirements.txt
     python LocalDashboard/dashboard.py                                   # local stack
     python LocalDashboard/dashboard.py --server https://traffic.alexkazos.com
@@ -14,9 +17,12 @@ then open http://localhost:8050.
 
 Options (or env vars):
   --server   SERVER_URL     dashboard service to read from  (default: http://localhost:8090)
+  --live-url LIVE_URL       target of the "Live video" link (default: the --server URL)
   --history  HISTORY_HOURS  hours of records kept in memory (default: 6)
   --refresh  REFRESH_S      seconds between updates         (default: 5)
+  --host     HOST           address to listen on            (default: 127.0.0.1)
   --port     PORT           port this dashboard listens on  (default: 8050)
+  TZ                        time zone of the chart times    (default: the machine's)
 
   CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
       Cloudflare Access service token, for a server behind Cloudflare Access
@@ -47,7 +53,6 @@ MAX_BINS    = 72                        # bins get coarser past this, so bars st
 LIMITS_KMH  = {"car": 90, "truck": 80}  # Q3 speed limits per vehicle type
 ALERT_ROWS  = 25
 ALL         = "__all__"                 # camera selector value for the overview
-LOCAL_TZ    = datetime.now().astimezone().tzinfo
 
 COLUMNS = ["id", "vehicle_id", "vehicle_type", "speed_kmh", "direction",
            "movement", "speed_source", "recorded_at"]
@@ -86,6 +91,11 @@ log = logging.getLogger("local_dashboard")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def local_tz():
+    """Current UTC offset of the local time zone; looked up per call, so DST changes apply."""
+    return datetime.now().astimezone().tzinfo
+
 
 def pretty(name: str) -> str:
     return name.replace("_", " ")
@@ -369,7 +379,7 @@ def alerts_table(df: pd.DataFrame, alert: float, show_camera: bool):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-def build_app(store: RecordStore, refresh_s: float) -> Dash:
+def build_app(store: RecordStore, refresh_s: float, live_url: str) -> Dash:
     history_min = int(store.history.total_seconds() // 60)
     windows = [w for w in WINDOWS_MIN if w <= history_min] or [history_min]
     radio = dict(className="segmented", inline=True)
@@ -380,7 +390,7 @@ def build_app(store: RecordStore, refresh_s: float) -> Dash:
             html.H1(["Traffic Monitoring", html.Span("Live analytics")]),
             html.Div(className="topbar-meta", children=[
                 html.Span("Connecting…", id="status", className="status off"),
-                html.A("Live video ↗", href=store.server, target="_blank", rel="noopener"),
+                html.A("Live video ↗", href=live_url, target="_blank", rel="noopener"),
             ]),
         ]),
         html.Main(className="page", children=[
@@ -424,7 +434,7 @@ def build_app(store: RecordStore, refresh_s: float) -> Dash:
         elif snap["synced_at"] is None:
             status = (f"Loading records from {store.server}…", "status off")
         else:
-            local = snap["synced_at"].astimezone(LOCAL_TZ)
+            local = snap["synced_at"].astimezone()
             status = (f"Live · synced {local:%H:%M:%S}", "status ok")
         return *status, (no_update if options == current_options else options)
 
@@ -470,7 +480,7 @@ def build_app(store: RecordStore, refresh_s: float) -> Dash:
         if types:
             df = df[df["vehicle_type"].isin(types)]
         df = df.assign(
-            time=df["time_utc"].dt.tz_convert(LOCAL_TZ).dt.tz_localize(None),
+            time=df["time_utc"].dt.tz_convert(local_tz()).dt.tz_localize(None),
             direction_label=df["direction"].map(pretty),
             facet=(df["camera"] if overview else df["direction"]).map(pretty),
             lane=(df["camera"].map(pretty) + " · " if overview else "") + df["direction"].map(pretty),
@@ -524,10 +534,14 @@ def main() -> None:
                "CF_ACCESS_CLIENT_SECRET to a service token.")
     parser.add_argument("--server", default=os.getenv("SERVER_URL", "http://localhost:8090"),
                         help="dashboard service to read from (default: %(default)s)")
+    parser.add_argument("--live-url", default=os.getenv("LIVE_URL"),
+                        help='target of the "Live video" link (default: the --server URL)')
     parser.add_argument("--history", type=float, default=float(os.getenv("HISTORY_HOURS", "6")),
                         help="hours of records kept in memory (default: %(default)s)")
     parser.add_argument("--refresh", type=float, default=float(os.getenv("REFRESH_S", "5")),
                         help="seconds between updates (default: %(default)s)")
+    parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"),
+                        help="address to listen on (default: %(default)s)")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8050")),
                         help="port this dashboard listens on (default: %(default)s)")
     args = parser.parse_args()
@@ -545,7 +559,8 @@ def main() -> None:
     threading.Thread(target=store.run, args=(args.refresh,), daemon=True).start()
 
     log.info("Reading %s — open http://localhost:%d", store.server, args.port)
-    build_app(store, args.refresh).run(host="127.0.0.1", port=args.port, debug=False)
+    app = build_app(store, args.refresh, args.live_url or store.server)
+    app.run(host=args.host, port=args.port, debug=False)
 
 
 if __name__ == "__main__":

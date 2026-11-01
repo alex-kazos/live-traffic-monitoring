@@ -33,6 +33,9 @@ body {
 .topbar h1 { margin: 0; font-size: 18px; font-weight: 600; }
 .topbar h1 span { margin-left: 8px; color: var(--muted); font-weight: 400; }
 .topbar-meta { color: var(--muted); font-size: 13px; }
+.topbar-right { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+.topbar-link { color: var(--accent); font-size: 13px; text-decoration: none; }
+.topbar-link:hover { text-decoration: underline; }
 
 .cameras {
   display: grid;

@@ -34,6 +34,12 @@ function duration(seconds) {
   return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
 }
 
+// A link to localhost only works for a viewer on this machine, not through the tunnel
+const LOCAL_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+function linkWorksHere(url) {
+  return !LOCAL_HOSTS.includes(new URL(url).hostname) || LOCAL_HOSTS.includes(location.hostname);
+}
+
 function logClass(line) {
   if (/\b(ERROR|CRITICAL)\b|Traceback/.test(line)) return "err";
   if (/\bWARNING\b/.test(line)) return "warn";
@@ -193,6 +199,11 @@ async function main() {
     alertSpeed = config.alert_speed_kmh;
     document.getElementById("meta").textContent =
       `Alert threshold ${alertSpeed} km/h · refreshes every ${POLL_MS / 1000}s`;
+    if (config.analytics_url && linkWorksHere(config.analytics_url)) {
+      const link = document.getElementById("analytics-link");
+      link.href = config.analytics_url;
+      link.hidden = false;
+    }
     if (!config.cameras.length) {
       grid.innerHTML = '<p class="message">No cameras configured. Set <code>CAMERAS</code> on the dashboard service.</p>';
       return;

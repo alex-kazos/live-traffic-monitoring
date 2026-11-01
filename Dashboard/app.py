@@ -12,6 +12,8 @@ Configuration env vars:
   DB_PATH          SQLite file path                (default: /data/db/traffic.db)
   FRAME_DIR        preview frame directory         (default: /data/frames)
   ALERT_SPEED_KMH  speed highlighted as an alert   (default: 130)
+  ANALYTICS_URL    target of the "Live analytics" link, e.g. http://localhost:8050
+                   (default: no link)
 """
 
 import asyncio
@@ -33,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 DB_PATH     = os.getenv("DB_PATH", "/data/db/traffic.db")
 FRAME_DIR   = Path(os.getenv("FRAME_DIR", "/data/frames"))
 ALERT_SPEED = float(os.getenv("ALERT_SPEED_KMH", "130"))
+ANALYTICS   = os.getenv("ANALYTICS_URL", "")
 STATIC_DIR  = Path(__file__).parent / "static"
 
 LOG_TAIL      = 300     # lines sent when a log view first loads
@@ -53,8 +56,21 @@ def parse_cameras(spec: str) -> dict[str, str]:
 
 CAMERAS = parse_cameras(os.getenv("CAMERAS", ""))
 
+
+# Browsers re-check the page and its scripts on every load (a cheap ETag match),
+# so a rebuilt dashboard shows up on a plain reload instead of a stale cached copy
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(NO_CACHE)
+        return response
+
+
 app = FastAPI(title="Traffic Monitoring Dashboard")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", RevalidatedStaticFiles(directory=STATIC_DIR), name="static")
 
 
 def container_for(camera: str) -> str:
@@ -132,13 +148,14 @@ def frame_age(camera: str) -> float | None:
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE)
 
 
 @app.get("/api/cameras")
 def cameras():
     return {
         "alert_speed_kmh": ALERT_SPEED,
+        "analytics_url":   ANALYTICS,
         "cameras": [{"name": n, "container": c} for n, c in CAMERAS.items()],
     }
 
