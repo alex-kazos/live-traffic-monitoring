@@ -25,6 +25,7 @@ Configuration env vars:
   KAFKA_TOPIC_ALERTS default: traffic-alerts
   ALERT_SPEED_KMH    km/h threshold for alerts           (default: 130)
   DB_PATH            SQLite file path                    (default: /data/db/traffic.db)
+  RETENTION_DAYS     delete this camera's records older than this (default: 7, 0 = keep all)
 
   --- Carriageway geometry (_L = left carriageway in the image, _R = right) ---
   ROI_L / ROI_R              measuring zone polygon "x,y;x,y;..." in pixels   (required)
@@ -53,7 +54,7 @@ import numpy as np
 import urllib.request
 import json
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -83,6 +84,11 @@ _ENV_VIDEO  = os.getenv("INPUT_VIDEO", "")
 CAMERA_NAME = os.getenv("CAMERA_NAME", _ENV_VIDEO or "unknown_cam")
 DB_PATH     = os.getenv("DB_PATH", "/data/db/traffic.db")
 ALERT_SPEED = float(os.getenv("ALERT_SPEED_KMH", "130"))
+
+# Records older than RETENTION_DAYS are deleted every PRUNE_EVERY_S; 0 keeps all
+RETENTION_DAYS = float(os.getenv("RETENTION_DAYS", "7"))
+PRUNE_EVERY_S  = 3600
+PRUNE_BATCH    = 5000     # rows per delete, so the write lock stays short
 
 if not _ENV_VIDEO:
     log.error("INPUT_VIDEO environment variable is not set. Exiting.")
@@ -252,6 +258,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_ve_cam    ON vehicle_events (camera_name);
         CREATE INDEX IF NOT EXISTS idx_ve_speed  ON vehicle_events (speed_kmh);
         CREATE INDEX IF NOT EXISTS idx_ve_dir    ON vehicle_events (direction);
+        CREATE INDEX IF NOT EXISTS idx_ve_time   ON vehicle_events (camera_name, recorded_at);
     """)
     conn.commit()
     log.info("SQLite ready at %s", db_path)
@@ -272,6 +279,25 @@ def insert_event(conn: sqlite3.Connection, camera: str, vehicle_id: str,
          direction, movement, speed_source, now),
     )
     conn.commit()
+
+
+def prune_events(conn: sqlite3.Connection, camera: str, days: float) -> int:
+    """Delete this camera's records older than `days`; returns the number removed."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    removed = 0
+    while True:
+        # Batches keep each write short, so the other tracker isn't locked out
+        n = conn.execute(
+            """DELETE FROM vehicle_events WHERE id IN (
+                   SELECT id FROM vehicle_events
+                   WHERE camera_name = ? AND recorded_at < ?
+                   LIMIT ?)""",
+            (camera, cutoff, PRUNE_BATCH),
+        ).rowcount
+        conn.commit()
+        removed += n
+        if n < PRUNE_BATCH:
+            return removed
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +596,7 @@ def main() -> None:
              PROCESS_WIDTH, CALIB_WIDTH)
     log.info("Alert ≥    : %.0f km/h", ALERT_SPEED)
     log.info("DB         : %s", DB_PATH)
+    log.info("Retention  : %s", f"{RETENTION_DAYS:g} days" if RETENTION_DAYS > 0 else "keep all")
     log.info("Preview    : %s", f"{FRAME_PATH} ({PREVIEW_FPS:g} fps)" if FRAME_PATH else "disabled")
     log.info("=" * 70)
 
@@ -606,11 +633,20 @@ def main() -> None:
     last_preview = 0.0
     proc_fps     = 0.0
     fps_t0, fps_f0 = time.monotonic(), 0
+    last_prune   = float("-inf")   # prune once at startup
 
     log.info("Processing stream — press Ctrl+C to stop.\n")
 
     try:
         while True:
+            # ── Retention: drop this camera's old records (also during outages)
+            if RETENTION_DAYS > 0 and time.monotonic() - last_prune >= PRUNE_EVERY_S:
+                last_prune = time.monotonic()
+                removed = prune_events(conn, CAMERA_NAME, RETENTION_DAYS)
+                if removed:
+                    log.info("Retention: removed %d records older than %g days",
+                             removed, RETENTION_DAYS)
+
             ok, frame = cap.read()
             if not ok:
                 log.warning("Stream read failed — reconnecting in 5 s …")

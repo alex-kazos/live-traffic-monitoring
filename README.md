@@ -42,6 +42,8 @@ In short: streams -> tracking -> Kafka -> Spark consumers -> SQLite.
 | `spark-analytics` | Spark Structured Streaming for Q1, Q2, Q3, Q5, and Q6 |
 | `spark-alerts` | Kafka consumer for Q4 alerts and SQLite persistence |
 | `dashboard` | Web UI on http://localhost:8090 — live video, logs, and records per camera |
+| `tunnel` | Optional public HTTPS URL for the dashboard via a Cloudflare Quick Tunnel (`--profile public` only) |
+| `tunnel-domain` | Optional fixed URL on your own domain via a named Cloudflare Tunnel (`--profile domain` only) |
 
 ---
 
@@ -72,6 +74,16 @@ The shared SQLite database at `/data/db/traffic.db` (Docker volume `db-data`) ho
 | `speed_kmh` | REAL | Speed that triggered the alert |
 | `direction` | TEXT | Road direction label |
 | `alerted_at` | TEXT | ISO-8601 UTC timestamp |
+
+### Retention
+
+Rows older than `RETENTION_DAYS` (default **7**, set to `0` to keep everything) are deleted by the service that writes them: each tracker prunes its own camera's `vehicle_events` once an hour, in small batches, and the alerts consumer prunes `speed_alerts` at startup and then at most hourly as new alerts arrive. SQLite reuses the freed pages, so the database file stops growing once it holds one retention window of data. To change the window, set it in a `.env` file next to `docker-compose.yml`:
+
+```
+RETENTION_DAYS=14
+```
+
+The other data is bounded as well: Kafka keeps topics for 24 hours (`KAFKA_LOG_RETENTION_HOURS`), each container's log is capped at 3 × 10 MB, and the preview volume holds only the newest frame per camera.
 
 ---
 
@@ -115,6 +127,47 @@ Open **http://localhost:8090**. For each tracking instance it shows:
 - **Logs** — the container's log output, read through the Docker socket.
 
 To add a camera to the dashboard, add a `CAMERA_NAME=container` pair to `CAMERAS` on the `dashboard` service and give the new tracking service `FRAME_DIR` plus the `frames-data` volume.
+
+### Share the dashboard online (Cloudflare Tunnel)
+
+The pipeline itself stays on your machine. A `cloudflared` container opens an outbound connection to Cloudflare, and Cloudflare serves the dashboard on a public HTTPS address, so no port has to be opened. There are two opt-in ways to run it.
+
+#### On your own subdomain (fixed URL)
+
+Needs a domain whose DNS is on Cloudflare, such as `alexkazos.com`. Adding a subdomain leaves the domain's existing records alone.
+
+1. In the Cloudflare dashboard, go to **Networking → Tunnels → Create a tunnel**, name it (for example `traffic-monitoring`), and choose **Docker**. Copy only the token, the long `eyJ…` string after `--token`; you don't need to run the command shown.
+2. Put the token in `.env` next to `docker-compose.yml`. It is a secret, and `.env` is git-ignored:
+   ```
+   TUNNEL_TOKEN=eyJ...
+   ```
+3. Start the stack with the tunnel; the dashboard should show the tunnel as connected:
+   ```powershell
+   docker compose --profile domain up -d --build
+   ```
+4. On the tunnel's **Routes** tab, select **Add route → Published application**: subdomain `traffic`, domain `alexkazos.com`, **Service URL** `http://dashboard:8000`. Use the compose service name, not `localhost:8090`, because `cloudflared` runs in its own container. Cloudflare creates the DNS record, and the dashboard is live at `https://traffic.alexkazos.com`. Keep it to one level of subdomain; deeper names need a paid certificate.
+5. Optional, to let only reviewers in: in **Zero Trust → Access controls → Applications**, create a **Self-hosted** application for `traffic.alexkazos.com` with an Allow policy for emails ending in `@aueb.gr` (plus your own address). New Zero Trust accounts sign users in with a Cloudflare account by default, so also add **One-time PIN** under **Integrations → Identity providers** so visitors can sign in with an emailed code. Without an Access application, anyone with the link can open the dashboard.
+
+#### Without a domain (temporary URL)
+
+The `tunnel` service uses a Quick Tunnel: no Cloudflare account is needed, and the address is a random `https://<words>.trycloudflare.com` that changes whenever the container restarts.
+
+```powershell
+docker compose --profile public up -d --build
+docker logs tunnel    # look for the https://….trycloudflare.com URL
+```
+
+Visitors have to sign in with a one-time PIN emailed to an allowed address. By default that is any `@aueb.gr` address; to allow others, set `ALLOWED_MAIL` in `.env` (comma-separated, `*@domain` allows a whole domain):
+
+```
+ALLOWED_MAIL=*@aueb.gr,you@example.com
+```
+
+#### Things to know
+
+- Either URL works only while the stack is running, so the host must stay on and online. For round-the-clock access, run the same `docker compose` command on a small Linux VPS (about 4 vCPU and 8 GB RAM for the two trackers, Kafka and Spark).
+- Each viewer receives both MJPEG video streams (5 fps by default), which comes out of the host's upload bandwidth; lower `PREVIEW_FPS` if that is a problem. Cloudflare's free-plan terms expect video to be served through a paid product, so this suits a few reviewers, not a widely shared live feed.
+- Both profiles are opt-in: a plain `docker compose up` still keeps the dashboard on `localhost` only.
 
 ### Inspect the database from the host
 
