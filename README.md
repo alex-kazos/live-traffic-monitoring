@@ -169,6 +169,25 @@ ALLOWED_MAIL=*@aueb.gr,you@example.com
 - Each viewer receives both MJPEG video streams (5 fps by default), which comes out of the host's upload bandwidth; lower `PREVIEW_FPS` if that is a problem. Cloudflare's free-plan terms expect video to be served through a paid product, so this suits a few reviewers, not a widely shared live feed.
 - Both profiles are opt-in: a plain `docker compose up` still keeps the dashboard on `localhost` only.
 
+### Start on demand (AWS EC2 + Cloudflare Worker)
+
+To keep a cloud host cheap, it runs only while someone is looking at it. When the host is off, `traffic.alexkazos.com` shows a **Start demo** page instead of an error. Clicking it starts the EC2 instance, the page reloads into the dashboard after about 3–5 minutes, and the host powers itself off a few hours later. The pieces:
+
+| File | Role |
+|---|---|
+| `deploy/aws/traffic-monitoring.service` | systemd unit: `docker compose --profile domain up -d` on every boot |
+| `deploy/aws/traffic-autostop.{service,timer}` | Powers the host off `HOURS` after it starts; EC2 then stops the instance and its compute billing |
+| `deploy/aws/install.sh` | Installs both units (`sudo deploy/aws/install.sh [HOURS]`, default 3) |
+| `deploy/aws/iam-policy.json` | Least-privilege policy for the Worker: start this one instance, read instance state |
+| `worker/demo-starter.js` | Cloudflare Worker on the dashboard hostname: passes requests through, or serves the start page while the tunnel is down |
+
+1. **On the EC2 host**, from the repo, run `sudo deploy/aws/install.sh`. Keep the host up longer while you work on it with `sudo systemctl stop traffic-autostop.timer`. Check that the instance's **Shutdown behavior** is **Stop** (EC2 → Actions → Instance settings), which is the default.
+2. **In AWS IAM**, create a user without console access and attach an inline policy from `deploy/aws/iam-policy.json`. Fill in the region, the account ID and the instance ID. Create an access key for it.
+3. **In Cloudflare**, go to **Workers & Pages → Create → Worker**. Replace the code with `worker/demo-starter.js` and deploy it. Under **Settings → Variables and Secrets**, add the variables `AWS_REGION` and `INSTANCE_ID` and the secrets `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Under **Domains & Routes**, add the route `traffic.alexkazos.com/*`.
+4. **Recommended:** put a Cloudflare Access application on `traffic.alexkazos.com` (see above), so only allowed visitors can start the host.
+
+The instance gets a new public IP on every start. The tunnel doesn't care, but SSH needs the new address; the DNS name stays `traffic.alexkazos.com`.
+
 ### Inspect the database from the host
 
 ```powershell

@@ -1,0 +1,17 @@
+# Brings the stack up (tunnel included) every time the host boots.
+# Installed by deploy/aws/install.sh, which fills in @REPO@.
+[Unit]
+Description=Traffic monitoring stack (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@REPO@
+ExecStart=/usr/bin/docker compose --profile domain up -d
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

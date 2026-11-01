@@ -21,11 +21,14 @@ Each message is a JSON-serialised dict with the schema:
 
 The producer is created lazily on first use and is shared for the lifetime
 of the tracking process.  If Kafka is unavailable the module degrades
-gracefully: events are silently dropped so that the CV pipeline continues.
+gracefully: events are dropped so that the CV pipeline continues, and the
+connection is retried every RETRY_AFTER_S (e.g. while Kafka is still starting
+after the host reboots).
 """
 
 import os
 import json
+import time
 import logging
 from typing import Optional
 
@@ -37,18 +40,20 @@ TOPIC_STATS = os.getenv("KAFKA_TOPIC_STATS", "traffic-stats")
 TOPIC_ALERTS = os.getenv("KAFKA_TOPIC_ALERTS", "traffic-alerts")
 ALERT_SPEED_KMH = float(os.getenv("ALERT_SPEED_KMH", "130"))
 
+RETRY_AFTER_S = 30  # wait before reconnecting after a failed attempt
+
 # ── Lazy producer singleton ───────────────────────────────────────────────────
 _producer = None
-_kafka_available = True  # set to False after the first connection failure
+_retry_at = 0.0  # monotonic time before which no reconnect is attempted
 
 
 def _get_producer():
     """Return the shared KafkaProducer, creating it on first call."""
-    global _producer, _kafka_available
-    if not _kafka_available:
-        return None
+    global _producer, _retry_at
     if _producer is not None:
         return _producer
+    if time.monotonic() < _retry_at:
+        return None
     try:
         from kafka import KafkaProducer  # imported lazily to avoid hard dep
 
@@ -65,10 +70,11 @@ def _get_producer():
     except Exception as exc:
         log.warning(
             "[producer] Kafka unavailable (%s). "
-            "Events will be skipped – CV pipeline continues.",
+            "Events will be skipped – retrying in %d s.",
             exc,
+            RETRY_AFTER_S,
         )
-        _kafka_available = False
+        _retry_at = time.monotonic() + RETRY_AFTER_S
         return None
 
 

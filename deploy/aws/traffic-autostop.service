@@ -1,0 +1,7 @@
+# Powers the host off; EC2 then stops the instance and stops billing for it.
+[Unit]
+Description=Power off the demo host to save cost
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl poweroff
