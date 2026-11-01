@@ -34,5 +34,5 @@ test_url.py
 # Optional large model weights
 Other/yolov8x.pt
 
-# Local compose overrides (ALLOWED_MAIL, RETENTION_DAYS)
+# Local compose overrides and secrets (TUNNEL_TOKEN, ALLOWED_MAIL, RETENTION_DAYS)
 .env

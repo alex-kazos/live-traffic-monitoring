@@ -11,6 +11,8 @@
 #   dashboard        – Live video, logs and records per camera (http://localhost:8090)
 #   tunnel           – Optional public URL for the dashboard (Cloudflare Quick Tunnel);
 #                      starts only with: docker compose --profile public up
+#   tunnel-domain    – Optional fixed URL on your own domain (named Cloudflare Tunnel);
+#                      starts only with: docker compose --profile domain up
 #
 # KRaft mode eliminates Zookeeper entirely — no more session-timeout crashes.
 # Data persisted to shared SQLite at /data/db/traffic.db (volume: db-data);
@@ -259,4 +261,21 @@ services:
       - http://dashboard:8000
       - --allowed-mail
       - "${ALLOWED_MAIL:-*@aueb.gr}"
+    restart: unless-stopped
+
+  # ── Public URL on your own domain — named Cloudflare Tunnel (opt-in) ────────
+  #    Create the tunnel in the Cloudflare dashboard with a published application
+  #    route to http://dashboard:8000, put its token in .env as TUNNEL_TOKEN, then:
+  #    docker compose --profile domain up -d
+  #    The hostname and any login (Cloudflare Access) are set in the dashboard.
+  tunnel-domain:
+    image: cloudflare/cloudflared:2026.10.1
+    container_name: tunnel-domain
+    logging: *default-logging
+    profiles: [domain]
+    networks: [traffic-net]
+    depends_on: [dashboard]
+    environment:
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN:-}"
+    command: ["tunnel", "--no-autoupdate", "run"]
     restart: unless-stopped

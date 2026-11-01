@@ -43,6 +43,7 @@ In short: streams -> tracking -> Kafka -> Spark consumers -> SQLite.
 | `spark-alerts` | Kafka consumer for Q4 alerts and SQLite persistence |
 | `dashboard` | Web UI on http://localhost:8090 — live video, logs, and records per camera |
 | `tunnel` | Optional public HTTPS URL for the dashboard via a Cloudflare Quick Tunnel (`--profile public` only) |
+| `tunnel-domain` | Optional fixed URL on your own domain via a named Cloudflare Tunnel (`--profile domain` only) |
 
 ---
 
@@ -129,7 +130,27 @@ To add a camera to the dashboard, add a `CAMERA_NAME=container` pair to `CAMERAS
 
 ### Share the dashboard online (Cloudflare Tunnel)
 
-The pipeline itself stays on your machine; the optional `tunnel` service runs `cloudflared`, which opens an outbound connection to Cloudflare and serves the dashboard on a public `https://<random-words>.trycloudflare.com` address. No Cloudflare account, domain, or open port is needed.
+The pipeline itself stays on your machine. A `cloudflared` container opens an outbound connection to Cloudflare, and Cloudflare serves the dashboard on a public HTTPS address, so no port has to be opened. There are two opt-in ways to run it.
+
+#### On your own subdomain (fixed URL)
+
+Needs a domain whose DNS is on Cloudflare, such as `alexkazos.com`. Adding a subdomain leaves the domain's existing records alone.
+
+1. In the Cloudflare dashboard, go to **Networking → Tunnels → Create a tunnel**, name it (for example `traffic-monitoring`), and choose **Docker**. Copy only the token, the long `eyJ…` string after `--token`; you don't need to run the command shown.
+2. Put the token in `.env` next to `docker-compose.yml`. It is a secret, and `.env` is git-ignored:
+   ```
+   TUNNEL_TOKEN=eyJ...
+   ```
+3. Start the stack with the tunnel; the dashboard should show the tunnel as connected:
+   ```powershell
+   docker compose --profile domain up -d --build
+   ```
+4. On the tunnel's **Routes** tab, select **Add route → Published application**: subdomain `traffic`, domain `alexkazos.com`, **Service URL** `http://dashboard:8000`. Use the compose service name, not `localhost:8090`, because `cloudflared` runs in its own container. Cloudflare creates the DNS record, and the dashboard is live at `https://traffic.alexkazos.com`. Keep it to one level of subdomain; deeper names need a paid certificate.
+5. Optional, to let only reviewers in: in **Zero Trust → Access controls → Applications**, create a **Self-hosted** application for `traffic.alexkazos.com` with an Allow policy for emails ending in `@aueb.gr` (plus your own address). New Zero Trust accounts sign users in with a Cloudflare account by default, so also add **One-time PIN** under **Integrations → Identity providers** so visitors can sign in with an emailed code. Without an Access application, anyone with the link can open the dashboard.
+
+#### Without a domain (temporary URL)
+
+The `tunnel` service uses a Quick Tunnel: no Cloudflare account is needed, and the address is a random `https://<words>.trycloudflare.com` that changes whenever the container restarts.
 
 ```powershell
 docker compose --profile public up -d --build
@@ -142,12 +163,11 @@ Visitors have to sign in with a one-time PIN emailed to an allowed address. By d
 ALLOWED_MAIL=*@aueb.gr,you@example.com
 ```
 
-Things to know:
+#### Things to know
 
-- The URL works only while the stack is running, so the host must stay on and online. For round-the-clock access, run the same `docker compose` command on a small Linux VPS (about 4 vCPU and 8 GB RAM for the two trackers, Kafka and Spark).
-- The URL changes whenever the `tunnel` container restarts; send the new one from `docker logs tunnel`. For a fixed hostname, create a named tunnel in the Cloudflare dashboard (needs a domain on Cloudflare) and run `cloudflared tunnel run --token <TUNNEL_TOKEN>` instead, with a Cloudflare Access policy in place of `--allowed-mail`.
-- Each viewer receives both MJPEG video streams (5 fps by default), which comes out of the host's upload bandwidth; lower `PREVIEW_FPS` if that is a problem.
-- `--profile public` is opt-in: a plain `docker compose up` still keeps the dashboard on `localhost` only.
+- Either URL works only while the stack is running, so the host must stay on and online. For round-the-clock access, run the same `docker compose` command on a small Linux VPS (about 4 vCPU and 8 GB RAM for the two trackers, Kafka and Spark).
+- Each viewer receives both MJPEG video streams (5 fps by default), which comes out of the host's upload bandwidth; lower `PREVIEW_FPS` if that is a problem. Cloudflare's free-plan terms expect video to be served through a paid product, so this suits a few reviewers, not a widely shared live feed.
+- Both profiles are opt-in: a plain `docker compose up` still keeps the dashboard on `localhost` only.
 
 ### Inspect the database from the host
 
