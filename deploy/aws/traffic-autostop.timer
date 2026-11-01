@@ -1,0 +1,10 @@
+# Fires @HOURS@ h after activation, i.e. after boot (or after install.sh).
+# Keep the host up longer:  sudo systemctl stop traffic-autostop.timer
+[Unit]
+Description=Power off the demo host @HOURS@ h after it starts
+
+[Timer]
+OnActiveSec=@HOURS@h
+
+[Install]
+WantedBy=timers.target
