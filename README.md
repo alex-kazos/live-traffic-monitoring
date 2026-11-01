@@ -26,6 +26,7 @@ The default `docker-compose.yml` stack runs without Zookeeper and follows this f
 3. `spark-analytics` reads `traffic-stats` and answers Q1, Q2, Q3, Q5, and Q6.
 4. `spark-alerts` reads `traffic-alerts`, prints real-time alerts, and stores them in SQLite.
 5. `dashboard` shows each tracking instance's annotated live video, logs, and SQLite records.
+6. `LocalDashboard/dashboard.py`, run on your own machine, charts those records live with Plotly, per camera.
 
 In short: streams -> tracking -> Kafka -> Spark consumers -> SQLite.
 
@@ -127,6 +128,27 @@ Open **http://localhost:8090**. For each tracking instance it shows:
 - **Logs** — the container's log output, read through the Docker socket.
 
 To add a camera to the dashboard, add a `CAMERA_NAME=container` pair to `CAMERAS` on the `dashboard` service and give the new tracking service `FRAME_DIR` plus the `frames-data` volume.
+
+### Live analytics (Plotly, run locally)
+
+`LocalDashboard/dashboard.py` is a Plotly Dash app that runs on your own machine. It reads the vehicle records from the dashboard service's API, keeps the last few hours in memory, pulls new records every 5 seconds and redraws:
+
+- **One tab per camera**, with a panel per carriageway, plus an **All cameras** tab that puts the cameras side by side. The cameras come from the server's `CAMERAS` list, so a new camera shows up as a new tab.
+- **Filters**: carriageway, vehicle type, time window (15 min to 6 h) and bin size (1, 5 or 15 min). A zoomed chart stays zoomed through the live updates.
+- **Charts**: average speed per time bin by vehicle type (Q6), vehicles per bin (Q5), average speed per carriageway and vehicle type over the window, and every measured speed against the alert line. Tiles count the vehicles over the Q3 limits and over the alert speed, and a table lists the newest over-speed vehicles (Q4).
+
+```powershell
+pip install -r LocalDashboard/requirements.txt
+python LocalDashboard/dashboard.py
+```
+
+Then open **http://localhost:8050**. By default it reads the local stack at http://localhost:8090. To read another host, pass `--server`:
+
+```powershell
+python LocalDashboard/dashboard.py --server https://traffic.alexkazos.com
+```
+
+If that hostname is behind Cloudflare Access, the script can't use the emailed PIN. Create a service token under **Zero Trust → Access controls → Service credentials**, add a policy with the **Service Auth** action for it to the Access application, and set `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` before starting. If the demo host is stopped, start it from the start page first; until then the header shows the server as unreachable. The other options are `--history` (hours kept in memory, default 6), `--refresh` (seconds, default 5) and `--port` (default 8050); see `--help`.
 
 ### Share the dashboard online (Cloudflare Tunnel)
 
@@ -231,6 +253,10 @@ traffic-monitoring/
 │   ├── Dockerfile
 │   ├── app.py                           # FastAPI: MJPEG video, logs, records API
 │   └── static/                          # index.html, app.js, style.css
+├── LocalDashboard/
+│   ├── dashboard.py                     # Plotly Dash: live analytics per camera, run locally
+│   ├── assets/style.css
+│   └── requirements.txt
 ├── Other/
 │   ├── monitor_traffic_supervision.py   # optional YOLOv8 + ByteTrack variant
 │   ├── get-model.bat                    # downloads the optional model weight

@@ -1,0 +1,177 @@
+/* Same palette as the live dashboard (Dashboard/static/style.css) */
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #1c222b;
+  --border: #2a313c;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --accent: #58a6ff;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+  color-scheme: dark;
+
+  /* Dash component theme (dropdowns, radio items) */
+  --Dash-Fill-Interactive-Strong: var(--accent);
+  --Dash-Fill-Interactive-Weak: rgba(88, 166, 255, 0.12);
+  --Dash-Fill-Inverse-Strong: var(--bg);
+  --Dash-Fill-Primary-Hover: rgba(255, 255, 255, 0.05);
+  --Dash-Fill-Primary-Active: rgba(255, 255, 255, 0.08);
+  --Dash-Fill-Disabled: rgba(255, 255, 255, 0.06);
+  --Dash-Stroke-Strong: #3d4550;
+  --Dash-Stroke-Weak: var(--border);
+  --Dash-Text-Strong: var(--text);
+  --Dash-Text-Primary: var(--text);
+  --Dash-Text-Weak: var(--muted);
+  --Dash-Text-Disabled: #6e7681;
+  --Dash-Shading-Weak: rgba(0, 0, 0, 0.4);
+  --Dash-Shading-Strong: rgba(0, 0, 0, 0.6);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.topbar h1 { margin: 0; font-size: 18px; font-weight: 600; }
+.topbar h1 span { margin-left: 8px; color: var(--muted); font-weight: 400; }
+.topbar-meta { display: flex; gap: 16px; align-items: baseline; color: var(--muted); font-size: 13px; }
+
+.status::before { content: "●"; margin-right: 6px; }
+.status.ok   { color: var(--ok); }
+.status.ok::before { animation: pulse 1.6s ease-in-out infinite; }
+.status.bad  { color: var(--bad); }
+.status.off  { color: var(--muted); }
+@keyframes pulse { 50% { opacity: 0.25; } }
+
+.page { display: flex; flex-direction: column; gap: 16px; padding: 16px 24px 32px; }
+
+/* ── Camera tabs ─────────────────────────────────────────────────────────── */
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); }
+.tabs label {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0 -1px;
+  padding: 8px 14px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+}
+.tabs label:hover { color: var(--text); }
+.tabs label.selected { border-bottom-color: var(--accent); }
+.tabs label.selected, .tabs label.selected * { color: var(--text); }
+.tabs input, .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+.tabs label:has(input:focus-visible),
+.segmented label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Filters ─────────────────────────────────────────────────────────────── */
+.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 20px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field > label { color: var(--muted); font-size: 12px; }
+.field:has(.dash-dropdown) { flex: 1 1 220px; max-width: 360px; }
+
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.segmented label {
+  display: inline-flex;
+  margin: 0;
+  padding: 5px 10px;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.segmented label:hover { color: var(--text); }
+.segmented label.selected { background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--border); }
+.segmented label.selected, .segmented label.selected * { color: var(--text); }
+
+/* ── KPI tiles ───────────────────────────────────────────────────────────── */
+.kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.kpi-label { color: var(--muted); font-size: 12px; }
+.kpi-value { font-size: 26px; font-weight: 600; line-height: 1.2; }
+.kpi-sub { color: var(--muted); font-size: 12px; }
+.kpi.critical .kpi-label::before { content: "▲"; margin-right: 6px; color: var(--bad); }
+
+/* ── Chart cards ─────────────────────────────────────────────────────────── */
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.card.wide { grid-column: 1 / -1; }
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px 0;
+}
+.card-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.card-note { color: var(--muted); font-size: 12px; }
+.card .js-plotly-plot, .card .dash-graph { padding: 0 6px; }
+
+/* ── Alerts table ────────────────────────────────────────────────────────── */
+.table-wrap { max-height: 360px; overflow: auto; margin-top: 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 6px 14px; text-align: left; white-space: nowrap; }
+th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+td { border-bottom: 1px solid #1f252e; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.mono { font-family: var(--mono); }
+td.muted { color: var(--muted); }
+td.speed { color: var(--bad); font-weight: 600; }
+.empty { margin: 0; padding: 24px; text-align: center; color: var(--muted); }
+
+@media (max-width: 1100px) {
+  .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .grid { grid-template-columns: minmax(0, 1fr); }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .topbar { flex-direction: column; gap: 4px; padding: 12px 16px; }
+  .page { padding: 12px 16px 24px; }
+}

@@ -38,6 +38,7 @@ STATIC_DIR  = Path(__file__).parent / "static"
 LOG_TAIL      = 300     # lines sent when a log view first loads
 LOG_MAX_LINES = 1000    # cap per poll if the browser fell far behind
 EVENTS_LIMIT  = 100
+RECORDS_LIMIT = 5000    # max rows per /records page
 
 
 def parse_cameras(spec: str) -> dict[str, str]:
@@ -189,6 +190,26 @@ def events(camera: str, after_id: int = 0):
         LIMIT :limit
     """, {"camera": camera, "after_id": after_id, "limit": EVENTS_LIMIT})
     return {"events": rows}
+
+
+@app.get("/api/cameras/{camera}/records")
+def records(camera: str, since: str = "", after_id: int = 0, limit: int = RECORDS_LIMIT):
+    """
+    Vehicle records with id > after_id recorded at or after `since` (ISO-8601 UTC),
+    oldest first — for clients that keep their own copy (LocalDashboard/dashboard.py).
+    A full page means there may be more: ask again with the last id as after_id.
+    """
+    container_for(camera)
+    rows = query("""
+        SELECT id, vehicle_id, vehicle_type, speed_kmh, direction,
+               movement, speed_source, recorded_at
+        FROM vehicle_events
+        WHERE camera_name = :camera AND id > :after_id AND recorded_at >= :since
+        ORDER BY id
+        LIMIT :limit
+    """, {"camera": camera, "after_id": after_id, "since": since,
+          "limit": max(1, min(limit, RECORDS_LIMIT))})
+    return {"records": rows}
 
 
 @app.get("/api/cameras/{camera}/logs")
