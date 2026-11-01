@@ -20,13 +20,15 @@ Environment variables:
   KAFKA_TOPIC_ALERTS default: traffic-alerts
   ALERT_SPEED_KMH  default: 130
   DB_PATH          default: /data/db/traffic.db
+  RETENTION_DAYS   delete alerts older than this     (default: 7, 0 = keep all)
 """
 
 import os
 import json
+import time
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from kafka import KafkaConsumer
 
@@ -36,6 +38,11 @@ KAFKA_TOPIC      = os.getenv("KAFKA_TOPIC_ALERTS", "traffic-alerts")
 GROUP_ID         = "traffic-alerts-group"
 ALERT_THRESHOLD  = float(os.getenv("ALERT_SPEED_KMH", "130"))
 DB_PATH          = os.getenv("DB_PATH", "/data/db/traffic.db")
+
+# Alerts older than RETENTION_DAYS are deleted at startup, then at most every
+# PRUNE_EVERY_S as alerts arrive (the table only grows when one arrives); 0 keeps all
+RETENTION_DAYS   = float(os.getenv("RETENTION_DAYS", "7"))
+PRUNE_EVERY_S    = 3600
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -63,7 +70,8 @@ def open_db(db_path: str) -> sqlite3.Connection:
             direction     TEXT    NOT NULL,
             alerted_at    TEXT    NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_alert_cam ON speed_alerts (camera_name);
+        CREATE INDEX IF NOT EXISTS idx_alert_cam  ON speed_alerts (camera_name);
+        CREATE INDEX IF NOT EXISTS idx_alert_time ON speed_alerts (alerted_at);
     """)
     conn.commit()
     log.info("SQLite ready at %s", db_path)
@@ -83,6 +91,26 @@ def save_alert(conn: sqlite3.Connection, camera: str, vehicle_id: str,
     conn.commit()
 
 
+def prune_alerts(conn: sqlite3.Connection, days: float) -> int:
+    """Delete alerts older than `days`; returns the number removed."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    removed = conn.execute(
+        "DELETE FROM speed_alerts WHERE alerted_at < ?", (cutoff,)
+    ).rowcount
+    conn.commit()
+    return removed
+
+
+def prune_if_due(conn: sqlite3.Connection, last_prune: float) -> float:
+    """Run prune_alerts if PRUNE_EVERY_S has passed; returns the new last-prune time."""
+    if RETENTION_DAYS <= 0 or time.monotonic() - last_prune < PRUNE_EVERY_S:
+        return last_prune
+    removed = prune_alerts(conn, RETENTION_DAYS)
+    if removed:
+        log.info("Retention: removed %d alerts older than %g days", removed, RETENTION_DAYS)
+    return time.monotonic()
+
+
 # ── Consumer loop ─────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -91,9 +119,12 @@ def main() -> None:
     log.info("Topic         : %s", KAFKA_TOPIC)
     log.info("Threshold     : %.0f km/h", ALERT_THRESHOLD)
     log.info("DB path       : %s", DB_PATH)
+    log.info("Retention     : %s",
+             f"{RETENTION_DAYS:g} days" if RETENTION_DAYS > 0 else "keep all")
     log.info("-" * 60)
 
     conn = open_db(DB_PATH)
+    last_prune = prune_if_due(conn, float("-inf"))
 
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
@@ -129,6 +160,7 @@ def main() -> None:
 
             # ── Persist to SQLite ─────────────────────────────────────
             save_alert(conn, camera, vid, vtype, speed, lane)
+            last_prune = prune_if_due(conn, last_prune)
 
         except (KeyError, ValueError, TypeError) as exc:
             log.error("Malformed alert message: %s  raw=%r", exc, message.value)
